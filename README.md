@@ -59,6 +59,7 @@ The forecast sensor also includes `ev_predictions` (per-EV current SoC, probabil
 - Better learned arrival-time and day-of-week probability models, calibrated from non-events as well as sessions; the current weights are a heuristic, **not statistically calibrated probabilities**.
 - Live charger target SoC, per-EV charge efficiency and confirmed charging stop prediction.
 - Sophisticated weekday/weekend baseload and short-term residual corrections.
+- Better household load detection & forecast. Based on historic data, start to observe big ticket loads and their expected energy useage (if trends are observable), e.g. heat pump is well recogniseable, or dryer, etc. many loads wont be recogniseable though.
 
 ## Baseline and SoC forecast algorithm
 
