@@ -107,6 +107,7 @@ class ForecastCoordinator:
         self.ev_details = []
         self.status = "Waiting for history"
         self.updated_at = None
+        self._last_emitted = None
 
     @property
     def options(self):
@@ -121,6 +122,35 @@ class ForecastCoordinator:
 
     @callback
     def _notify(self):
+        # Avoid making HAEO recalculate on each sensor event when neither
+        # the live demand nor the future forecast changed materially.
+        # A charging transition changes predicted EV power by far more than
+        # the 100 W deadband and always publishes.
+        signature = (
+            self.status,
+            self.current_kw,
+            tuple((p["time"], p["value"]) for p in self.forecast),
+        )
+        previous = self._last_emitted
+        changed = previous is None or previous[0] != signature[0]
+        if not changed:
+            old_now, old_forecast = previous[1], previous[2]
+            new_now, new_forecast = signature[1], signature[2]
+            if old_now is None or new_now is None:
+                changed = old_now != new_now
+            else:
+                changed = abs(old_now - new_now) >= 0.10
+            if not changed:
+                if len(old_forecast) != len(new_forecast):
+                    changed = True
+                else:
+                    changed = any(
+                        ta != tb or abs(va - vb) >= 0.10
+                        for (ta, va), (tb, vb) in zip(old_forecast, new_forecast)
+                    )
+        if not changed:
+            return
+        self._last_emitted = signature
         for listener in self.listeners:
             if listener.hass is not None:
                 listener.async_write_ha_state()
