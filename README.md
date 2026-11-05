@@ -1,6 +1,6 @@
 # unPlugged Forecast
 
-**v0.2.0 experimental** — Home Assistant / HACS integration for **EV-cleaned historical household load + SoC-informed EV session prediction**, with a forecast suitable for [HAEO](https://github.com/hass-energy/haeo).
+**v0.2.1 experimental** — Home Assistant / HACS integration for **EV-cleaned historical household load + SoC-informed EV session prediction**, with a forecast suitable for [HAEO](https://github.com/hass-energy/haeo).
 
 This is a **forecaster**, not an EV charger controller. It does not command chargers or batteries.
 
@@ -41,6 +41,21 @@ Then open the integration's **Configure** (Options) and choose **Add an EV** for
 - **Forecast status** — history coverage and errors.
 
 The forecast sensor also includes `ev_predictions` (per-EV current SoC, probability, AC energy to target, expected AC energy and assumed session start), as well as `matched_history_hours`.
+## v0.2.1 forecast stability fix
+
+This release addresses unstable HAEO load input and repeated re-optimizations seen when measured household and EV charging loads were stable.
+
+- Timestamps are aligned to fixed UTC 15/30/60-minute boundaries instead of resetting the series origin with each new HA event.
+- Every `forecast` point describes **average demand over a complete period**, including the first period. We no longer put a live instantaneous reading into the first point and a historical/EV interval average into the second.
+- The forecast declares `interpolation_mode: previous` so HAEO holds each interval's value instead of drawing linear ramps between interval means.
+- In-progress EV charging is represented at measured EV power in the current period, even if the charge began midway through it; future periods use the finite session energy estimate.
+- Sensor events are suppressed if the live household power and all interval predictions change by less than **0.1 kW** without a status/timestamp change. Larger changes, including charge start/stop, still trigger prompt updates. Fixed boundaries still roll as time progresses.
+- The sensor's numeric **state remains the actual live whole-house demand** for display. HAEO consumes the `forecast` attribute as the optimized load input.
+
+The first bucket is a future-demand estimate, not an accounting reconstruction of energy consumed before the current time. Keep the original household power sensor for examining instantaneous demand.
+
+Tests: `python -m unittest discover -s tests -v`. Because these are pure-python timing tests, they don't require HA. Validate in an installed Home Assistant before unattended dispatch.
+
 ## v0.2 implemented (initial heuristics)
 
 - **Session learning:** recorder raw EV charging-power transitions are grouped into sessions (up to at least 14 days of history). Candidate start slots use observed hour and weekday, weighted toward matching weekdays; the configured start hour remains a prior.
@@ -92,7 +107,7 @@ The forecast is republished every 5 minutes, its historical baseline/session mod
 
 ## How live load is used
 
-The **current** state of the Load forecast sensor is the measured whole-house power, including actual EV charging. The time series in its `forecast` attribute uses the EV-free historical load baseline plus predicted EV sessions.
+The **current** state of the Load forecast sensor is measured whole-house power, including actual EV charging. The series in its `forecast` attribute uses fixed, UTC-aligned period means of EV-free historical load plus predicted/active EV charging, including for the very first point.
 
 **Live non-EV correction:** at each update, the integration computes
 `residual = (current_house_power - current_ev_power) - historical_nonEV_baseline_now`.
@@ -100,7 +115,7 @@ This residual is added to the **future non-EV** load forecast with exponential d
 
 **Live EV charging:** whenever measured EV charging is detected, active power and current SoC replace the speculative EV session with a confirmed near-term forecast. When the session ends, the charging profile disappears. The *measured* charger power and *predicted* charger power are **never added together** for the same current session.
 
-**Limitations:** The first forecast point is measured consumption; later points are future predictions. Forecast points are spaced by the configured interval; HAEO interpolates its own optimization periods. Short bursts and stale sensors can make this prediction inaccurate. The historical baseline excludes EV charging only where both power sensors have matching Recorder statistics.
+**Limitations:** The sensor state is measured consumption; all forecast points are future-period estimates. Forecast points are spaced by the configured interval; HAEO interpolates its own optimization periods. Short bursts and stale sensors can make this prediction inaccurate. The historical baseline excludes EV charging only where both power sensors have matching Recorder statistics.
 
 ## Feed it to HAEO
 
