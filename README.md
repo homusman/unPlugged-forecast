@@ -40,9 +40,9 @@ Then open the integration's **Configure** (Options) and choose **Add an EV** for
 
 The forecast sensor also includes `ev_predictions` (per-EV current SoC, probability, AC energy to target, expected AC energy and assumed session start), as well as `matched_history_hours`.
 ## TODO
-- use historical SoC data to automatically learn charging behaviour
+- use historical SoC data to automatically learn charging behaviour (start time, weekday dependence??)
 - detect which EV is plugged in by observing which SoC increases once charge session is detected, use this to accurately update energy needed for current session in forecast.
-- 
+- identify if a forecasted session did not occur, move the session to later so that energy is freed up for other pruposes (perhaps at least the next most probable slot e.g. next evening or whatever the learned behaviour is. if it ends up happening earlier, no problems the live session update will bring it forward)
 
 ## V0.1 forecast algorithm
 
