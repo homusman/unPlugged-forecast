@@ -376,6 +376,12 @@ class ForecastCoordinator:
                         1 for s in self._sessions if s["ev_id"] == ev["id"]
                     ),
                 })
+            historical_now = (
+                self._baseline[local_now.hour] if self._baseline else None
+            )
+            live_residual = (
+                base_live - historical_now if historical_now is not None else 0.0
+            )
             interval = int(opt["interval_minutes"])
             total = math.ceil(horizon * 60 / interval)
             period = timedelta(minutes=interval)
@@ -386,6 +392,14 @@ class ForecastCoordinator:
                 local = dt_util.as_local(at)
                 historical = self._baseline[local.hour] if self._baseline else None
                 base = historical if historical is not None else base_live
+                # Unexpected non-EV loads affect the short-term forecast
+                # without contaminating the multi-day household pattern.
+                # The residual is anchored to the historical load at NOW,
+                # not to each future hour's baseline.
+                decay_minutes = float(opt.get("live_decay_minutes", 30))
+                if decay_minutes > 0 and historical_now is not None:
+                    elapsed_minutes = (at - now).total_seconds() / 60
+                    base += live_residual * math.exp(-elapsed_minutes / decay_minutes)
                 ev_power = 0.0
                 for session in sessions:
                     overlap = max(
