@@ -15,6 +15,7 @@ The setup asks for:
 - **Historical days**: N-day mean of hourly demand after subtracting EV power (default 7, range 1–30).
 - **Forecast horizon**: default 48 hours.
 - **Forecast resolution**: default 30 minutes (15/30/60 available).
+- **Live correction decay**: default 30 minutes (0 disables). Deviations of the current non-EV load from the historical baseline are added to the near-term projection with an exponential decay, instead of persisting for 48 hours.
 
 Then open the integration's **Configure** (Options) and choose **Add an EV** for each car. Each EV includes:
 
@@ -48,6 +49,7 @@ The forecast sensor also includes `ev_predictions` (per-EV current SoC, probabil
 - **Unexpected charging:** measured EV power always overrides the SoC probability for an active session, including when SoC is above the configured typical maximum. When energy to normal target is exhausted, use a provisional one-hour estimate rather than pretend charging stops instantly.
 - **Away state:** optional binary sensor (`on`) or device tracker (`not_home`); raises probability by 25% if away. Without an ETA this does not predict the precise return time.
 - **Diagnostics:** the forecast sensor now includes each EV's session candidates, identification method, SoC gains, away state and historical session count.
+- **Short-term live household feedback:** unexpected non-EV power is blended into the future baseline as `live_residual * exp(-minutes_ahead / decay_minutes)`; EV charging is modelled separately from measured charging power and SoC.
 - **Regression tests:** `python -m unittest discover -s tests -v` tests the pure learning helpers.
 
 ### Still planned
@@ -86,6 +88,18 @@ If charging power is already detected (>=0.25 kW), v0.2 replaces the future even
 **History limitation:** Baseline history requires matching *hourly recorder statistics* for **both** the household power and EV charging power sensors. Missing EV statistics are **not** interpreted as zero, so the forecaster will instead temporarily fall back to current non-EV baseload for missing historical hours. You can check coverage in the Forecast status sensor. Set up both statistics-producing power sensors and retain enough recorder history.
 
 The forecast is republished every 5 minutes, its historical baseline/session model is refreshed hourly, and live household load, EV charger power, EV SoC or away state changes trigger a forecast update after ~20 seconds (debounced). This can trigger HAEO to reoptimize.
+
+## How live load is used
+
+The **current** state of the Load forecast sensor is the measured whole-house power, including actual EV charging. The time series in its `forecast` attribute uses the EV-free historical load baseline plus predicted EV sessions.
+
+**Live non-EV correction:** at each update, the integration computes
+`residual = (current_house_power - current_ev_power) - historical_nonEV_baseline_now`.
+This residual is added to the **future non-EV** load forecast with exponential decay (configurable 0–240 minutes, default 30). Thus a 2 kW unexpected oven or appliance load modifies the first few forecast periods without being assumed to run all night. Set the decay to **0** to use the pure historical average for future non-EV loads.
+
+**Live EV charging:** whenever measured EV charging is detected, active power and current SoC replace the speculative EV session with a confirmed near-term forecast. When the session ends, the charging profile disappears. The *measured* charger power and *predicted* charger power are **never added together** for the same current session.
+
+**Limitations:** The first forecast point is measured consumption; later points are future predictions. Forecast points are spaced by the configured interval; HAEO interpolates its own optimization periods. Short bursts and stale sensors can make this prediction inaccurate. The historical baseline excludes EV charging only where both power sensors have matching Recorder statistics.
 
 ## Feed it to HAEO
 
