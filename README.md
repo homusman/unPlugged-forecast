@@ -1,6 +1,6 @@
 # unPlugged Forecast
 
-**v0.1.0 experimental** — Home Assistant / HACS integration for **EV-cleaned historical household load + SoC-informed EV session prediction**, with a forecast suitable for [HAEO](https://github.com/hass-energy/haeo).
+**v0.2.0 experimental** — Home Assistant / HACS integration for **EV-cleaned historical household load + SoC-informed EV session prediction**, with a forecast suitable for [HAEO](https://github.com/hass-energy/haeo).
 
 This is a **forecaster**, not an EV charger controller. It does not command chargers or batteries.
 
@@ -28,6 +28,7 @@ Then open the integration's **Configure** (Options) and choose **Add an EV** for
 | Assumed charger power (kW) | Determine duration of a predicted future session |
 | Assumed next charging hour | **Timing assumption**, defaults to 18:00 local |
 | Probability curve exponent | Defaults to 2: more likely at low SoC |
+| Optional away status | Binary sensor ON or device tracker `not_home`; modestly raises charge likelihood for away EVs |
 
 **After adding an EV**, the integration reloads, retrieves history again and produces updated forecasts.
 
@@ -39,13 +40,25 @@ Then open the integration's **Configure** (Options) and choose **Add an EV** for
 - **Forecast status** — history coverage and errors.
 
 The forecast sensor also includes `ev_predictions` (per-EV current SoC, probability, AC energy to target, expected AC energy and assumed session start), as well as `matched_history_hours`.
-## TODO
-- use historical SoC data to automatically learn charging behaviour (start time, weekday dependence, energy used per day to forecast longer term incoming charge)
-- detect which EV is plugged in by observing which SoC increases once charge session is detected, use this to accurately update energy needed for current session in forecast.
-- identify if a forecasted session did not occur, move the session to later so that energy is freed up for other pruposes (perhaps at least the next most probable slot e.g. next evening or whatever the learned behaviour is. if it ends up happening earlier, no problems the live session update will bring it forward)
-- what is the behaviour if there were no forecasted sessions but an active session begins? e.g. at 70% soc or so no predicted session, but plugs in due to upcoming unplanned trip.
-- Optional addition to each EV object: detect when away and use this to inform if charging may be required soon. heading back & will arrive with low SoC -> charging session more likely. 
-## V0.1 forecast algorithm
+## v0.2 implemented (initial heuristics)
+
+- **Session learning:** recorder raw EV charging-power transitions are grouped into sessions (up to at least 14 days of history). Candidate start slots use observed hour and weekday, weighted toward matching weekdays; the configured start hour remains a prior.
+- **EV identification:** compare per-EV SoC increases during observed sessions. An ongoing charge is attributed to an EV with SoC increase >=0.5%; otherwise explicitly label the lowest-relative-SoC fallback **unconfirmed**.
+- **Missed sessions:** past candidate starts are excluded after a 45-minute grace period and the expected-event probability is redistributed across future candidates (including later evenings). It **does not** multiply the full energy demand by every candidate.
+- **Unexpected charging:** measured EV power always overrides the SoC probability for an active session, including when SoC is above the configured typical maximum. When energy to normal target is exhausted, use a provisional one-hour estimate rather than pretend charging stops instantly.
+- **Away state:** optional binary sensor (`on`) or device tracker (`not_home`); raises probability by 25% if away. Without an ETA this does not predict the precise return time.
+- **Diagnostics:** the forecast sensor now includes each EV's session candidates, identification method, SoC gains, away state and historical session count.
+- **Regression tests:** `python -m unittest discover -s tests -v` tests the pure learning helpers.
+
+### Still planned
+
+- Confident charger-to-vehicle identification (per-EV charging power / plugged-in sensors); active SoC rise is observational and may be delayed.
+- Proper expected **daily EV driving energy / future SoC** estimation over multi-day horizons. v0.2 distributes the current-SoC-derived expected **next** charge over possible starts, not a complete recurrent driving/charging simulation.
+- Better learned arrival-time and day-of-week probability models, calibrated from non-events as well as sessions; the current weights are a heuristic, **not statistically calibrated probabilities**.
+- Live charger target SoC, per-EV charge efficiency and confirmed charging stop prediction.
+- Sophisticated weekday/weekend baseload and short-term residual corrections.
+
+## Baseline and SoC forecast algorithm
 
 ```text
 Historical baseline hour-of-day =
@@ -64,15 +77,15 @@ Expected EV power profile =
 Total forecast = cleaned baseline + sum of all predicted EV sessions
 ```
 
-If charging power is already detected (>0.2 kW), v0.1 replaces the future event probability with a **confirmed active session**, starting immediately and with duration estimated from remaining SoC and measured charge power.
+If charging power is already detected (>=0.25 kW), v0.2 replaces the future event probability with a **confirmed active session**, starting immediately and with duration estimated from remaining SoC and measured charge power.
 
-**Important timing assumption:** A live SoC sensor cannot tell us *when the user will decide to plug in*. The initial heuristic uses a configured start hour for **one next session per EV**, not recurring daily phantom charges. Session-start learning, plugged-in status and vehicle location are future enhancements.
+**Important timing assumption:** A live SoC sensor cannot tell us *when the user will decide to plug in*. The initial heuristic uses a configured start hour as a **prior**. Once sufficient recorder history exists, candidate start times are also learned from charging sessions; future candidate weights sum to at most one expected event per EV. Explicit plug-in/ETA telemetry remains a future enhancement.
 
-**Multiple EVs:** Because v0.1 accepts one combined EV charger-power sensor, it cannot reliably identify which EV is actively charging. In this prototype, it associates an active session with the EV having the lowest SoC. This is a heuristic. Future versions should support per-EV charger/plug state to resolve this correctly.
+**Multiple EVs:** One combined EV charger-power sensor still cannot definitively identify a charging EV. v0.2 uses rising SoC in recent history where possible. If no EV shows a convincing rise yet, it falls back to the lowest relative SoC and explicitly marks identification as unconfirmed. Per-EV charger/plug signals remain preferable.
 
 **History limitation:** Baseline history requires matching *hourly recorder statistics* for **both** the household power and EV charging power sensors. Missing EV statistics are **not** interpreted as zero, so the forecaster will instead temporarily fall back to current non-EV baseload for missing historical hours. You can check coverage in the Forecast status sensor. Set up both statistics-producing power sensors and retain enough recorder history.
 
-The output updates every 15 minutes, and roughly 20 seconds after live household load, EV charger power or EV SoC changes (debounced). This can trigger HAEO to reoptimize.
+The forecast is republished every 5 minutes, its historical baseline/session model is refreshed hourly, and live household load, EV charger power, EV SoC or away state changes trigger a forecast update after ~20 seconds (debounced). This can trigger HAEO to reoptimize.
 
 ## Feed it to HAEO
 
@@ -90,10 +103,10 @@ HAEO's load forecasts use time/value pairs in kW:
 5. Confirm HAEO replans after a known charging-power or EV SoC change.
 6. Avoid using speculative EV forecasts alone to guarantee energy for an important trip. This is an expected-value model, not a hard reserve.
 
-## Planned v0.2+
+## Planned v0.3+
 
 - Separate plug-in/charging-power sensors for every EV; distinguish unplanned charging from predicted future sessions.
-- Historical charging-event detection and start-time probability distributions.
+- Calibrated charging-event and non-event probabilities with proper driving-energy replenishment over long horizons.
 - Weekday/weekend cleaned baseload profiles; short-term residual correction.
 - Probability/scenario selection, confidence bands, calibrated probability models and explicit home-battery reserve policy.
 - Tests for missing data, daylight-saving transitions and HAEO interpolation.
