@@ -309,7 +309,10 @@ class ForecastCoordinator:
                     if unknown_target:
                         identity += "; target already reached, 1h provisional"
                 else:
-                    probability = p_soc
+                    # A car known to be away may return needing a charge.
+                    # This only increases the likelihood, not the predicted
+                    # arrival time; a binary away flag cannot tell us ETA.
+                    probability = min(1.0, p_soc * (1.25 if away else 1.0))
                     weights = candidate_weights(
                         local_now, ev, self._sessions, dt_util.as_local, horizon
                     )
