@@ -97,6 +97,7 @@ class ForecastCoordinator:
         self._history_count = 0
         self._sessions = []
         self._soc_history = {}
+        self._live_soc = {}
         self._active_since = None
         self.current_kw = None
         self.baseload_kw = None
@@ -127,6 +128,14 @@ class ForecastCoordinator:
         await self.async_refresh_history()
         watched = {self.options["house_load"], self.options["ev_power"]}
         watched.update(ev["soc_sensor"] for ev in self.evs)
+        now = dt_util.utcnow()
+        for ev in self.evs:
+            try:
+                self._live_soc.setdefault(ev["id"], []).append(
+                    (now, current_soc(self.hass, ev["soc_sensor"]))
+                )
+            except ValueError:
+                pass
         watched.update(ev["away_sensor"] for ev in self.evs if ev.get("away_sensor"))
         self._unsubs.append(async_track_state_change_event(
             self.hass, list(watched), self._source_changed
@@ -148,6 +157,25 @@ class ForecastCoordinator:
 
     @callback
     def _source_changed(self, event):
+        entity_id = event.data.get("entity_id")
+        now = dt_util.utcnow()
+        for ev in self.evs:
+            if entity_id != ev["soc_sensor"]:
+                continue
+            new = event.data.get("new_state")
+            try:
+                value = float(new.state)
+                if not math.isfinite(value) or not 0 <= value <= 100:
+                    break
+                samples = self._live_soc.setdefault(ev["id"], [])
+                samples.append((now, value))
+                cutoff = now - timedelta(hours=12)
+                self._live_soc[ev["id"]] = [
+                    (at, val) for at, val in samples if at >= cutoff
+                ]
+            except (AttributeError, TypeError, ValueError):
+                pass
+            break
         if self._timer is None:
             self._timer = async_call_later(self.hass, 20, self._on_debounce)
 
@@ -233,11 +261,12 @@ class ForecastCoordinator:
         for ev in self.evs:
             rows = self._soc_history.get(ev["id"], [])
             # Include live values since the last hourly history fetch.
-            recent = list(rows)
+            recent = list(rows) + list(self._live_soc.get(ev["id"], []))
             try:
                 recent.append((now, current_soc(self.hass, ev["soc_sensor"])))
             except ValueError:
                 continue
+            recent.sort(key=lambda row: row[0])
             gains[ev["id"]] = recent_soc_delta(recent, start - timedelta(minutes=10))
         if gains:
             winner = max(gains, key=gains.get)
