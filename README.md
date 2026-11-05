@@ -39,6 +39,10 @@ Then open the integration's **Configure** (Options) and choose **Add an EV** for
 - **Forecast status** — history coverage and errors.
 
 The forecast sensor also includes `ev_predictions` (per-EV current SoC, probability, AC energy to target, expected AC energy and assumed session start), as well as `matched_history_hours`.
+## TODO
+- use historical SoC data to automatically learn charging behaviour
+- detect which EV is plugged in by observing which SoC increases once charge session is detected, use this to accurately update energy needed for current session in forecast.
+- 
 
 ## V0.1 forecast algorithm
 
