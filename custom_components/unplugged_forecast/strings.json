@@ -45,7 +45,8 @@
           "soc_sensor": "EV SoC sensor",
           "charge_power_kw": "Assumed AC charging power (kW)",
           "start_hour": "Assumed next charging hour (local time, 0–23)",
-          "probability_gamma": "Probability curve exponent"
+          "probability_gamma": "Probability curve exponent",
+          "away_sensor": "Optional away status (binary sensor or device tracker)"
         }
       },
       "edit_ev": {
@@ -64,7 +65,8 @@
           "soc_sensor": "EV SoC sensor",
           "charge_power_kw": "Assumed AC charging power (kW)",
           "start_hour": "Assumed next charging hour (local time, 0–23)",
-          "probability_gamma": "Probability curve exponent"
+          "probability_gamma": "Probability curve exponent",
+          "away_sensor": "Optional away status (binary sensor or device tracker)"
         }
       },
       "remove_ev": {
