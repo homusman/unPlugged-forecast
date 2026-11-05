@@ -1,0 +1,84 @@
+{
+  "title": "unPlugged Forecast",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up historical load forecast",
+        "description": "Use household total power (including EV charging) and the combined EV charging power sensor. Configure EVs afterward in Options.",
+        "data": {
+          "house_load": "Whole-house load power sensor",
+          "ev_power": "Total EV charging power sensor",
+          "history_days": "Historical averaging window (days)",
+          "horizon_hours": "Forecast horizon (hours)",
+          "interval_minutes": "Forecast interval (minutes)"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "menu_options": {
+          "settings": "Forecast settings",
+          "add_ev": "Add an EV",
+          "edit_ev": "Edit an EV",
+          "remove_ev": "Remove an EV"
+        }
+      },
+      "settings": {
+        "title": "Forecast settings",
+        "data": {
+          "house_load": "Whole-house load power sensor",
+          "ev_power": "Combined EV charging power sensor",
+          "history_days": "Historical days to average",
+          "horizon_hours": "Forecast horizon (hours)",
+          "interval_minutes": "Forecast interval (minutes)"
+        }
+      },
+      "add_ev": {
+        "title": "Add EV",
+        "data": {
+          "name": "EV name",
+          "min_soc": "Typical minimum SoC (%)",
+          "max_soc": "Typical maximum SoC (%)",
+          "capacity_kwh": "Usable battery capacity (kWh)",
+          "soc_sensor": "EV SoC sensor",
+          "charge_power_kw": "Assumed AC charging power (kW)",
+          "start_hour": "Assumed next charging hour (local time, 0–23)",
+          "probability_gamma": "Probability curve exponent"
+        }
+      },
+      "edit_ev": {
+        "title": "Choose EV to edit",
+        "data": {
+          "ev_id": "EV"
+        }
+      },
+      "edit_ev_details": {
+        "title": "Edit EV",
+        "data": {
+          "name": "EV name",
+          "min_soc": "Typical minimum SoC (%)",
+          "max_soc": "Typical maximum SoC (%)",
+          "capacity_kwh": "Usable battery capacity (kWh)",
+          "soc_sensor": "EV SoC sensor",
+          "charge_power_kw": "Assumed AC charging power (kW)",
+          "start_hour": "Assumed next charging hour (local time, 0–23)",
+          "probability_gamma": "Probability curve exponent"
+        }
+      },
+      "remove_ev": {
+        "title": "Remove EV",
+        "data": {
+          "ev_id": "EV"
+        }
+      }
+    },
+    "error": {
+      "invalid_soc_range": "Minimum SoC must be below maximum SoC; name cannot be empty."
+    },
+    "abort": {
+      "no_evs": "No EVs have been configured."
+    }
+  }
+}
