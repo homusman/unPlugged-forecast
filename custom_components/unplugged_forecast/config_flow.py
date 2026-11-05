@@ -39,6 +39,10 @@ def ev_schema(values=None):
             vol.All(vol.Coerce(float), vol.Range(min=1, max=250)),
         vol.Required("soc_sensor", default=data.get("soc_sensor", "")):
             selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
+        vol.Optional("away_sensor", description={"suggested_value": data.get("away_sensor")}):
+            selector.EntitySelector(selector.EntitySelectorConfig(
+                domain=["binary_sensor", "device_tracker"]
+            )),
         vol.Required("charge_power_kw", default=data.get("charge_power_kw", DEFAULT_CHARGE_POWER)):
             vol.All(vol.Coerce(float), vol.Range(min=0.1, max=50)),
         vol.Required("start_hour", default=data.get("start_hour", DEFAULT_START_HOUR)):
