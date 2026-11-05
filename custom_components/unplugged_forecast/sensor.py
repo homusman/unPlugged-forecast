@@ -36,7 +36,7 @@ class UnpluggedSensor(SensorEntity):
             "identifiers": {(DOMAIN, self.coordinator.entry.entry_id)},
             "name": "unPlugged Forecast",
             "manufacturer": "homusman",
-            "model": "Probabilistic EV load forecasting v0.1",
+            "model": "Probabilistic EV load forecasting",
         }
 
     @property
@@ -60,6 +60,7 @@ class UnpluggedSensor(SensorEntity):
         if self.key == "forecast":
             return {
                 "forecast": c.forecast,
+                "interpolation_mode": "previous",
                 "ev_predictions": c.ev_details,
                 "matched_history_hours": c._history_count,
                 "updated_at": c.updated_at,
