@@ -43,7 +43,7 @@ The forecast sensor also includes `ev_predictions` (per-EV current SoC, probabil
 - use historical SoC data to automatically learn charging behaviour (start time, weekday dependence??)
 - detect which EV is plugged in by observing which SoC increases once charge session is detected, use this to accurately update energy needed for current session in forecast.
 - identify if a forecasted session did not occur, move the session to later so that energy is freed up for other pruposes (perhaps at least the next most probable slot e.g. next evening or whatever the learned behaviour is. if it ends up happening earlier, no problems the live session update will bring it forward)
-
+- what is the behaviour if there were no forecasted sessions but an active session begins? e.g. at 70% soc or so no predicted session, but plugs in due to upcoming unplanned trip.
 ## V0.1 forecast algorithm
 
 ```text
