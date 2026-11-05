@@ -1,51 +1,88 @@
-"""Recorder-backed baseload and SoC-informed EV session forecast."""
+"""Recorder-backed historical baseload and EV-session-aware forecast."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
 import asyncio
+from datetime import datetime, timedelta
 import logging
 import math
+
 from homeassistant.components.recorder import get_instance
+from homeassistant.components.recorder.history import get_significant_states
 from homeassistant.components.recorder.statistics import statistics_during_period
 from homeassistant.core import callback
-from homeassistant.helpers.event import async_track_state_change_event, async_track_time_interval, async_call_later
+from homeassistant.helpers.event import (
+    async_call_later, async_track_state_change_event, async_track_time_interval,
+)
 from homeassistant.util import dt as dt_util
-from .const import DOMAIN, UPDATE_MINUTES, DEFAULT_EFFICIENCY
+
+from .const import DEFAULT_EFFICIENCY
+from .learning import (
+    candidate_weights, extract_sessions, parse_series, power_multiplier,
+    recent_soc_delta, soc_probability,
+)
 
 _LOGGER = logging.getLogger(__name__)
+HISTORY_REFRESH_MINUTES = 60
+ACTIVE_THRESHOLD_KW = 0.25
 
 
 def unit_to_kw(value, unit):
-    unit = (unit or "").strip().lower()
-    if unit == "w":
-        return value / 1000.0
-    if unit == "kw":
-        return value
-    if unit == "mw":
-        return value * 1000.0
-    raise ValueError(f"Power sensor has unsupported unit {unit!r}; use W, kW or MW")
-
-
-def row_value(row):
-    value = row.get("mean")
-    return float(value) if value is not None and math.isfinite(float(value)) else None
+    mult = power_multiplier(unit)
+    if mult is None:
+        raise ValueError(f"Power sensor unit must be W, kW or MW, got {unit!r}")
+    v = float(value) * mult
+    if not math.isfinite(v):
+        raise ValueError("Nonfinite power")
+    return v
 
 
 def current_power(hass, entity_id):
     state = hass.states.get(entity_id)
-    if state is None or state.state in ("unavailable", "unknown"):
-        raise ValueError(f"Missing power sensor: {entity_id}")
-    return unit_to_kw(float(state.state), state.attributes.get("unit_of_measurement"))
+    if not state or state.state in ("unavailable", "unknown"):
+        raise ValueError(f"Unavailable power sensor: {entity_id}")
+    return unit_to_kw(state.state, state.attributes.get("unit_of_measurement"))
 
 
 def current_soc(hass, entity_id):
     state = hass.states.get(entity_id)
-    if state is None:
-        raise ValueError(f"Missing SoC sensor: {entity_id}")
+    if not state or state.state in ("unavailable", "unknown"):
+        raise ValueError(f"Unavailable EV SoC: {entity_id}")
     value = float(state.state)
     if not math.isfinite(value) or not 0 <= value <= 100:
         raise ValueError(f"Invalid EV SoC: {entity_id}")
     return value
+
+
+def state_is_away(hass, entity_id):
+    """Optional away indicator: binary_sensor on or device_tracker not_home."""
+    if not entity_id:
+        return None
+    state = hass.states.get(entity_id)
+    if not state or state.state in ("unknown", "unavailable"):
+        return None
+    return state.state.lower() in ("on", "not_home", "away")
+
+
+def history_index(rows, multiplier):
+    data = {}
+    for row in rows or []:
+        val = row.get("mean")
+        if val is None:
+            continue
+        try:
+            value = float(val) * multiplier
+            at = row.get("start")
+            if isinstance(at, (int, float)):
+                at = datetime.fromtimestamp(at, dt_util.UTC)
+            elif isinstance(at, str):
+                at = datetime.fromisoformat(at.replace("Z", "+00:00"))
+            if not at or not math.isfinite(value):
+                continue
+            at = at.astimezone(dt_util.UTC).replace(minute=0, second=0, microsecond=0)
+            data[at] = value
+        except (ValueError, TypeError):
+            continue
+    return data
 
 
 class ForecastCoordinator:
@@ -58,6 +95,9 @@ class ForecastCoordinator:
         self._lock = asyncio.Lock()
         self._baseline = None
         self._history_count = 0
+        self._sessions = []
+        self._soc_history = {}
+        self._active_since = None
         self.current_kw = None
         self.baseload_kw = None
         self.ev_kw = None
@@ -74,8 +114,8 @@ class ForecastCoordinator:
     def evs(self):
         return self.entry.options.get("evs", self.entry.data.get("evs", []))
 
-    def add_listener(self, listener):
-        self.listeners.append(listener)
+    def add_listener(self, entity):
+        self.listeners.append(entity)
 
     @callback
     def _notify(self):
@@ -85,13 +125,17 @@ class ForecastCoordinator:
 
     async def async_start(self):
         await self.async_refresh_history()
-        watched = [self.options["house_load"], self.options["ev_power"]]
-        watched.extend(e["soc_sensor"] for e in self.evs)
+        watched = {self.options["house_load"], self.options["ev_power"]}
+        watched.update(ev["soc_sensor"] for ev in self.evs)
+        watched.update(ev["away_sensor"] for ev in self.evs if ev.get("away_sensor"))
         self._unsubs.append(async_track_state_change_event(
-            self.hass, watched, self._source_changed
+            self.hass, list(watched), self._source_changed
         ))
         self._unsubs.append(async_track_time_interval(
-            self.hass, self.async_refresh_history, timedelta(minutes=UPDATE_MINUTES)
+            self.hass, self.async_refresh_history, timedelta(minutes=HISTORY_REFRESH_MINUTES)
+        ))
+        self._unsubs.append(async_track_time_interval(
+            self.hass, self.async_publish, timedelta(minutes=5)
         ))
 
     async def async_stop(self):
@@ -104,8 +148,6 @@ class ForecastCoordinator:
 
     @callback
     def _source_changed(self, event):
-        # A short debounce is sufficient to limit HAEO optimizations from
-        # continuously reporting power and SoC sensors.
         if self._timer is None:
             self._timer = async_call_later(self.hass, 20, self._on_debounce)
 
@@ -113,146 +155,224 @@ class ForecastCoordinator:
         self._timer = None
         await self.async_publish()
 
-    def _history_sync(self, start, end, house_id, ev_id):
-        # Recorder's blocking statistics query runs in the executor.
-        return statistics_during_period(
-            self.hass, start, end, {house_id, ev_id},
-            "hour", None, {"mean"},
+    def _history_sync(self, start, end, house_id, ev_id, soc_ids):
+        stats = statistics_during_period(
+            self.hass, start, end, {house_id, ev_id}, "hour", None, {"mean"}
         )
+        raw = get_significant_states(
+            self.hass, start, end,
+            [ev_id, *soc_ids], include_start_time_state=True,
+            significant_changes_only=True, no_attributes=True,
+        )
+        return stats, raw
 
     async def async_refresh_history(self, _now=None):
         async with self._lock:
             try:
                 opt = self.options
                 now = dt_util.utcnow()
-                days = opt["history_days"]
-                start = now - timedelta(days=days)
-                ids = [opt["house_load"], opt["ev_power"]]
-                stats = await get_instance(self.hass).async_add_executor_job(
-                    self._history_sync, start, now, *ids
+                days = int(opt["history_days"])
+                house_id, ev_id = opt["house_load"], opt["ev_power"]
+                ids = list({e["soc_sensor"] for e in self.evs})
+                start = now - timedelta(days=max(days, 14))
+                stats, raw = await get_instance(self.hass).async_add_executor_job(
+                    self._history_sync, start, now, house_id, ev_id, ids
                 )
-
-                house_unit = self.hass.states.get(ids[0]).attributes.get("unit_of_measurement")
-                ev_unit = self.hass.states.get(ids[1]).attributes.get("unit_of_measurement")
-                # Reconcile by UTC hour, then map each hour to local time of day.
-                def index_rows(rows, unit):
-                    result = {}
-                    for row in rows or []:
-                        val = row_value(row)
-                        if val is None:
-                            continue
-                        at = row.get("start")
-                        if isinstance(at, (float, int)):
-                            at = datetime.fromtimestamp(at, dt_util.UTC)
-                        elif isinstance(at, str):
-                            at = datetime.fromisoformat(at.replace("Z", "+00:00"))
-                        if at is None:
-                            continue
-                        result[at.astimezone(dt_util.UTC).replace(minute=0, second=0, microsecond=0)] = unit_to_kw(val, unit)
-                    return result
-
-                house = index_rows(stats.get(ids[0], []), house_unit)
-                ev = index_rows(stats.get(ids[1], []), ev_unit)
-                values = [[] for _ in range(24)]
+                # Baseload uses only the configured N-day window, even if
+                # EV-learning examines a longer period.
+                house_state = self.hass.states.get(house_id)
+                ev_state = self.hass.states.get(ev_id)
+                if not house_state or not ev_state:
+                    raise ValueError("History input sensor missing")
+                house_factor = power_multiplier(house_state.attributes.get("unit_of_measurement"))
+                ev_factor = power_multiplier(ev_state.attributes.get("unit_of_measurement"))
+                if house_factor is None or ev_factor is None:
+                    raise ValueError("History sensors need W/kW/MW power units")
+                house = history_index(stats.get(house_id), house_factor)
+                ev_data = history_index(stats.get(ev_id), ev_factor)
+                daily_hours = [[] for _ in range(24)]
+                recent_start = now - timedelta(days=days)
                 for at, h in house.items():
-                    # Do not incorrectly absorb EV spikes when EV history is absent.
-                    if at not in ev:
+                    if at < recent_start or at not in ev_data:
                         continue
-                    local = dt_util.as_local(at)
-                    values[local.hour].append(max(0.0, h - max(0.0, ev[at])))
-                self._history_count = sum(map(len, values))
+                    daily_hours[dt_util.as_local(at).hour].append(
+                        max(0.0, h - max(0.0, ev_data[at]))
+                    )
                 self._baseline = [
-                    sum(hour) / len(hour) if hour else None for hour in values
+                    sum(samples) / len(samples) if samples else None
+                    for samples in daily_hours
                 ]
+                self._history_count = sum(len(samples) for samples in daily_hours)
+
+                power_rows = [
+                    (stamp, value * ev_factor)
+                    for stamp, value in parse_series(raw.get(ev_id))
+                ]
+                # Extend current on/off condition to 'now' so a session
+                # still in progress appears as an active training example.
+                if power_rows:
+                    live_ev = current_power(self.hass, ev_id)
+                    power_rows.append((now, max(0.0, live_ev)))
+                soc_history = {
+                    ev["id"]: parse_series(raw.get(ev["soc_sensor"]))
+                    for ev in self.evs
+                }
+                self._sessions = extract_sessions(power_rows, soc_history)
+                self._soc_history = soc_history
             except Exception as exc:
-                _LOGGER.warning("Unable to load energy history: %s", exc)
-                self._baseline = None
-                self._history_count = 0
+                _LOGGER.warning("Unable to refresh load/session history: %s", exc)
+                # Retain last valid learned data rather than silently
+                # overwriting it with a new empty model.
+                self.status = f"History refresh failed: {exc}"
         await self.async_publish()
 
-    async def async_publish(self):
+    def _select_active_ev(self, now):
+        """Attribute ongoing charge using SoC increases, then explicit fallback."""
+        gains = {}
+        start = self._active_since or now - timedelta(hours=3)
+        for ev in self.evs:
+            rows = self._soc_history.get(ev["id"], [])
+            # Include live values since the last hourly history fetch.
+            recent = list(rows)
+            try:
+                recent.append((now, current_soc(self.hass, ev["soc_sensor"])))
+            except ValueError:
+                continue
+            gains[ev["id"]] = recent_soc_delta(recent, start - timedelta(minutes=10))
+        if gains:
+            winner = max(gains, key=gains.get)
+            if gains[winner] >= 0.5:
+                return winner, "SoC increase", gains
+        if not self.evs:
+            return None, "no EV configured", gains
+        # Uncertain fallback, never label as a positive identification.
+        ev = min(
+            self.evs,
+            key=lambda e: (
+                current_soc(self.hass, e["soc_sensor"]) -
+                float(e["min_soc"])
+            ) / max(1.0, float(e["max_soc"]) - float(e["min_soc"])),
+        )
+        return ev["id"], "lowest relative SoC (unconfirmed)", gains
+
+    async def async_publish(self, _now=None):
         try:
             opt = self.options
             now = dt_util.utcnow()
-            home = current_power(self.hass, opt["house_load"])
-            ev_measured = max(0.0, current_power(self.hass, opt["ev_power"]))
-            live_base = max(0.0, home - ev_measured)
+            horizon = int(opt["horizon_hours"])
+            house = current_power(self.hass, opt["house_load"])
+            measured_ev = max(0.0, current_power(self.hass, opt["ev_power"]))
+            base_live = max(0.0, house - measured_ev)
+            charging = measured_ev >= ACTIVE_THRESHOLD_KW
+            if charging and self._active_since is None:
+                # Recorder can supply more accurate start through session history.
+                ongoing = [
+                    s for s in self._sessions
+                    if s["end"] >= now - timedelta(minutes=30)
+                ]
+                self._active_since = ongoing[-1]["start"] if ongoing else now
+            elif not charging:
+                self._active_since = None
+            active_ev_id, identification, gains = (
+                self._select_active_ev(now) if charging else (None, "inactive", {})
+            )
 
-            # Forecast the next session per EV; never assume a session repeats
-            # daily within a single forecast horizon.
             sessions = []
-            ev_details = []
-            active_index = None
-            if ev_measured > 0.2 and self.evs:
-                # A shared EV power sensor cannot reveal which EV is charging.
-                # Select the lowest relative SoC as a documented fallback.
-                active_index = min(range(len(self.evs)),
-                                   key=lambda i: current_soc(self.hass, self.evs[i]["soc_sensor"]))
-            for index, ev in enumerate(self.evs):
+            details = []
+            local_now = dt_util.as_local(now)
+            for ev in self.evs:
                 soc = current_soc(self.hass, ev["soc_sensor"])
-                low, high = float(ev["min_soc"]), float(ev["max_soc"])
-                remaining = max(0.0, (high - soc) / 100.0 * float(ev["capacity_kwh"]))
-                fraction = max(0.0, min(1.0, (high - soc) / (high - low)))
-                probability = fraction ** float(ev["probability_gamma"])
-                active = index == active_index
-                power = ev_measured if active else float(ev["charge_power_kw"])
+                low = float(ev["min_soc"])
+                high = float(ev["max_soc"])
+                capacity = float(ev["capacity_kwh"])
+                remaining_kwh = max(0.0, (high - soc) / 100.0 * capacity)
+                ac_kwh = remaining_kwh / DEFAULT_EFFICIENCY
+                p_soc = soc_probability(soc, low, high, float(ev["probability_gamma"]))
+                active = ev["id"] == active_ev_id
+                away = state_is_away(self.hass, ev.get("away_sensor"))
+                identity = identification if active else "not charging"
+                candidate_info = []
                 if active:
-                    probability = 1.0
-                    start = now
-                else:
-                    local = dt_util.as_local(now)
-                    start_local = local.replace(hour=int(ev["start_hour"]), minute=0,
-                                                second=0, microsecond=0)
-                    if start_local <= local:
-                        start_local += timedelta(days=1)
-                    start = start_local.astimezone(dt_util.UTC)
-                # Expected charge load = probability-weighted energy over
-                # the time required for a full charging event.
-                required_ac_kwh = remaining / DEFAULT_EFFICIENCY
-                duration_h = required_ac_kwh / power if power > 0 else 0
-                if duration_h > 0 and probability > 0:
+                    # Always honour a detected session, including surprise
+                    # charging near/above the configured normal maximum.
+                    # If the configured target is already passed, reserve
+                    # one hour provisionally until charger power stops.
+                    power = measured_ev
+                    unknown_target = ac_kwh <= 0.01
+                    duration_h = ac_kwh / power if not unknown_target else 1.0
                     sessions.append({
-                        "start": start, "end": start + timedelta(hours=duration_h),
-                        "power": power * probability, "name": ev["name"],
+                        "start": now, "end": now + timedelta(hours=duration_h),
+                        "power": power, "ev_id": ev["id"]
                     })
-                ev_details.append({
+                    probability = 1.0
+                    start_iso = now.isoformat()
+                    if unknown_target:
+                        identity += "; target already reached, 1h provisional"
+                else:
+                    probability = p_soc
+                    weights = candidate_weights(
+                        local_now, ev, self._sessions, dt_util.as_local, horizon
+                    )
+                    # If currently away, arrival cannot be inferred from
+                    # away=true alone; the start-time distribution remains
+                    # probabilistic, rather than assuming the EV is home.
+                    total_weight = sum(weight for _, weight in weights)
+                    power = float(ev["charge_power_kw"])
+                    duration_h = ac_kwh / power if power else 0
+                    for at, weight in weights:
+                        chance = probability * weight / total_weight if total_weight else 0
+                        if chance <= 0 or duration_h <= 0:
+                            continue
+                        start = at.astimezone(dt_util.UTC)
+                        sessions.append({
+                            "start": start, "end": start + timedelta(hours=duration_h),
+                            "power": power * chance, "ev_id": ev["id"]
+                        })
+                        candidate_info.append({
+                            "start": start.isoformat(), "probability": round(chance, 4)
+                        })
+                    start_iso = candidate_info[0]["start"] if candidate_info else None
+                details.append({
                     "name": ev["name"], "soc": round(soc, 1),
-                    "charge_probability": round(probability, 3),
-                    "energy_to_target_kwh": round(required_ac_kwh, 2),
-                    "expected_energy_kwh": round(required_ac_kwh * probability, 2),
-                    "start": start.isoformat(), "active_assumed": active,
+                    "charge_probability": round(probability, 4),
+                    "energy_to_target_kwh": round(ac_kwh, 2),
+                    "expected_energy_kwh": round(ac_kwh * probability, 2),
+                    "start": start_iso, "active_assumed": active,
+                    "identification": identity, "soc_gains": gains if active else {},
+                    "away": away, "candidate_sessions": candidate_info[:18],
+                    "learned_sessions": sum(
+                        1 for s in self._sessions if s["ev_id"] == ev["id"]
+                    ),
                 })
-
             interval = int(opt["interval_minutes"])
-            count = math.ceil(int(opt["horizon_hours"]) * 60 / interval)
+            total = math.ceil(horizon * 60 / interval)
             period = timedelta(minutes=interval)
             forecast = []
-            for i in range(count + 1):
+            for i in range(total + 1):
                 at = now + i * period
                 end = at + period
                 local = dt_util.as_local(at)
-                hourly = self._baseline[local.hour] if self._baseline is not None else None
-                base = hourly if hourly is not None else live_base
-                predicted_ev = 0.0
+                historical = self._baseline[local.hour] if self._baseline else None
+                base = historical if historical is not None else base_live
+                ev_power = 0.0
                 for session in sessions:
-                    overlap_s = max(0.0, (min(end, session["end"]) -
-                                         max(at, session["start"])).total_seconds())
-                    predicted_ev += session["power"] * overlap_s / period.total_seconds()
-                # First point captures actual current consumption. Future
-                # forecast bins use cleaned historical baseline plus EV plan.
-                value = home if i == 0 else max(0.0, base) + predicted_ev
+                    overlap = max(
+                        0.0, (min(end, session["end"]) - max(at, session["start"])).total_seconds()
+                    )
+                    ev_power += session["power"] * overlap / period.total_seconds()
+                value = house if i == 0 else max(0.0, base) + ev_power
                 forecast.append({"time": at.isoformat(), "value": round(max(0.0, value), 3)})
-
-            self.current_kw = home
-            self.baseload_kw = live_base
-            self.ev_kw = ev_measured
+            self.current_kw = house
+            self.baseload_kw = base_live
+            self.ev_kw = measured_ev
             self.forecast = forecast
-            self.ev_details = ev_details
+            self.ev_details = details
             self.updated_at = now.isoformat()
+            coverage = f"{self._history_count} baseline hours; {len(self._sessions)} historical sessions"
             if self._history_count < 24:
-                self.status = f"Limited history ({self._history_count} matched hours); live baseline fallback used"
+                self.status = f"Limited history: {coverage}"
             else:
-                self.status = f"OK: {self._history_count} matched non-EV historical hours"
+                self.status = f"OK: {coverage}"
         except Exception as exc:
             self.status = f"Unavailable: {exc}"
             self.forecast = []
