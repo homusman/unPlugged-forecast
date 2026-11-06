@@ -11,7 +11,8 @@
           "history_days": "Historical averaging window (days)",
           "horizon_hours": "Forecast horizon (hours)",
           "interval_minutes": "Forecast interval (minutes)",
-          "live_decay_minutes": "Short-term live-load correction decay (minutes, 0 disables)"
+          "live_decay_minutes": "Short-term live-load correction decay (minutes, 0 disables)",
+          "input_grace_minutes": "Sensor unavailable grace period (minutes; 0 disables)"
         }
       }
     }
@@ -34,7 +35,8 @@
           "history_days": "Historical days to average",
           "horizon_hours": "Forecast horizon (hours)",
           "interval_minutes": "Forecast interval (minutes)",
-          "live_decay_minutes": "Short-term live-load correction decay (minutes, 0 disables)"
+          "live_decay_minutes": "Short-term live-load correction decay (minutes, 0 disables)",
+          "input_grace_minutes": "Sensor unavailable grace period (minutes; 0 disables)"
         }
       },
       "add_ev": {
