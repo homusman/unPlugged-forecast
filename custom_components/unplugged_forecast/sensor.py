@@ -64,5 +64,6 @@ class UnpluggedSensor(SensorEntity):
                 "ev_predictions": c.ev_details,
                 "matched_history_hours": c._history_count,
                 "updated_at": c.updated_at,
+                "input_health": c._input_health,
             }
         return None
