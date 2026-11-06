@@ -306,12 +306,22 @@ class ForecastCoordinator:
         if not self.evs:
             return None, "no EV configured", gains
         # Uncertain fallback, never label as a positive identification.
-        ev = min(
-            self.evs,
-            key=lambda e: (
-                current_soc(self.hass, e["soc_sensor"]) -
-                float(e["min_soc"])
-            ) / max(1.0, float(e["max_soc"]) - float(e["min_soc"])),
+        # A missing SoC must not invalidate the entire forecast. Only
+        # consider EVs whose live SoC is valid for uncertain attribution.
+        eligible = []
+        for ev in self.evs:
+            try:
+                soc = current_soc(self.hass, ev["soc_sensor"])
+            except (ValueError, TypeError):
+                continue
+            eligible.append((ev, soc))
+        if not eligible:
+            return None, "no EV with valid SoC", gains
+        ev, _ = min(
+            eligible,
+            key=lambda item: (
+                item[1] - float(item[0]["min_soc"])
+            ) / max(1.0, float(item[0]["max_soc"]) - float(item[0]["min_soc"])),
         )
         return ev["id"], "lowest relative SoC (unconfirmed)", gains
 
@@ -339,9 +349,31 @@ class ForecastCoordinator:
 
             sessions = []
             details = []
+            unavailable_evs = []
             local_now = dt_util.as_local(now)
             for ev in self.evs:
-                soc = current_soc(self.hass, ev["soc_sensor"])
+                try:
+                    soc = current_soc(self.hass, ev["soc_sensor"])
+                except (ValueError, TypeError) as exc:
+                    # Missing EV SoC -> assume no *future* charging demand for
+                    # this EV. Do not let one unavailable MQTT sensor erase the
+                    # independent household baseload forecast. Keep actual
+                    # measured house and EV power for current-state reporting.
+                    unavailable_evs.append(ev["name"])
+                    details.append({
+                        "name": ev["name"], "soc": None,
+                        "charge_probability": 0.0,
+                        "energy_to_target_kwh": 0.0,
+                        "expected_energy_kwh": 0.0,
+                        "start": None, "active_assumed": False,
+                        "identification": f"SoC unavailable; future EV charging omitted ({exc})",
+                        "soc_gains": {}, "away": state_is_away(self.hass, ev.get("away_sensor")),
+                        "candidate_sessions": [],
+                        "learned_sessions": sum(
+                            1 for session in self._sessions if session["ev_id"] == ev["id"]
+                        ),
+                    })
+                    continue
                 low = float(ev["min_soc"])
                 high = float(ev["max_soc"])
                 capacity = float(ev["capacity_kwh"])
@@ -429,6 +461,11 @@ class ForecastCoordinator:
                 self.status = f"Limited history: {coverage}"
             else:
                 self.status = f"OK: {coverage}"
+            if unavailable_evs:
+                self.status += (
+                    "; EV SoC unavailable, charging forecast omitted for: "
+                    + ", ".join(unavailable_evs)
+                )
         except Exception as exc:
             self.status = f"Unavailable: {exc}"
             self.forecast = []
