@@ -27,6 +27,8 @@ def main_schema(values=None):
             vol.In([15, 30, 60]),
         vol.Required("live_decay_minutes", default=data.get("live_decay_minutes", 30)):
             vol.All(vol.Coerce(int), vol.Range(min=0, max=240)),
+        vol.Required("input_grace_minutes", default=data.get("input_grace_minutes", 10)):
+            vol.All(vol.Coerce(int), vol.Range(min=0, max=120)),
     })
 
 def ev_schema(values=None):
