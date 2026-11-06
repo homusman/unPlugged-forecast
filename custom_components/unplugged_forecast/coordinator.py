@@ -99,6 +99,10 @@ class ForecastCoordinator:
         self._sessions = []
         self._soc_history = {}
         self._live_soc = {}
+        # Last valid readings; a temporary HA unavailable state does not
+        # immediately invalidate a slow-moving forecast.
+        self._input_cache = {}
+        self._input_health = {}
         self._active_since = None
         self.current_kw = None
         self.baseload_kw = None
@@ -116,6 +120,47 @@ class ForecastCoordinator:
     @property
     def evs(self):
         return self.entry.options.get("evs", self.entry.data.get("evs", []))
+
+    def _input(self, entity_id, kind, now):
+        """Read a live sensor with a bounded, observable last-good-value grace.
+
+        Cache age is measured from the last *valid* reading, never refreshed
+        by repeated unavailable events. This prevents stale values persisting
+        indefinitely. Missing optional away states degrade to None.
+        """
+        state = self.hass.states.get(entity_id)
+        try:
+            if kind == "power":
+                value = current_power(self.hass, entity_id)
+            elif kind == "soc":
+                value = current_soc(self.hass, entity_id)
+            elif kind == "away":
+                if not state or state.state in ("unknown", "unavailable"):
+                    raise ValueError(f"Unavailable away sensor: {entity_id}")
+                value = state_is_away(self.hass, entity_id)
+            else:
+                raise ValueError(f"Unexpected input kind: {kind}")
+        except (ValueError, TypeError) as exc:
+            cached = self._input_cache.get((entity_id, kind))
+            age = (now - cached[1]).total_seconds() if cached else None
+            grace_s = int(self.options.get("input_grace_minutes", 10)) * 60
+            if cached is not None and age is not None and 0 <= age <= grace_s:
+                self._input_health[entity_id] = {
+                    "status": "stale", "age_seconds": round(age),
+                    "grace_seconds": grace_s, "source_state": state.state if state else "missing",
+                }
+                return cached[0]
+            self._input_health[entity_id] = {
+                "status": "expired" if cached else "missing",
+                "age_seconds": round(age) if age is not None else None,
+                "grace_seconds": grace_s, "source_state": state.state if state else "missing",
+            }
+            if kind == "away":
+                return None
+            raise ValueError(f"{exc}; cached reading expired or absent") from exc
+        self._input_cache[(entity_id, kind)] = (value, now)
+        self._input_health.pop(entity_id, None)
+        return value
 
     def add_listener(self, entity):
         self.listeners.append(entity)
@@ -160,10 +205,19 @@ class ForecastCoordinator:
         watched = {self.options["house_load"], self.options["ev_power"]}
         watched.update(ev["soc_sensor"] for ev in self.evs)
         now = dt_util.utcnow()
+        # Prime all configured inputs, including optional away states.
+        for entity, kind in [(self.options["house_load"], "power"),
+                             (self.options["ev_power"], "power")]:
+            try:
+                self._input(entity, kind, now)
+            except ValueError:
+                pass
         for ev in self.evs:
+            if ev.get("away_sensor"):
+                self._input(ev["away_sensor"], "away", now)
             try:
                 self._live_soc.setdefault(ev["id"], []).append(
-                    (now, current_soc(self.hass, ev["soc_sensor"]))
+                    (now, self._input(ev["soc_sensor"], "soc", now))
                 )
             except ValueError:
                 pass
@@ -270,7 +324,7 @@ class ForecastCoordinator:
                 # Extend current on/off condition to 'now' so a session
                 # still in progress appears as an active training example.
                 if power_rows:
-                    live_ev = current_power(self.hass, ev_id)
+                    live_ev = self._input(ev_id, "power", now)
                     power_rows.append((now, max(0.0, live_ev)))
                 soc_history = {
                     ev["id"]: parse_series(raw.get(ev["soc_sensor"]))
@@ -294,7 +348,9 @@ class ForecastCoordinator:
             # Include live values since the last hourly history fetch.
             recent = list(rows) + list(self._live_soc.get(ev["id"], []))
             try:
-                recent.append((now, current_soc(self.hass, ev["soc_sensor"])))
+                soc = self._input(ev["soc_sensor"], "soc", now)
+                if ev["soc_sensor"] not in self._input_health:
+                    recent.append((now, soc))
             except ValueError:
                 continue
             recent.sort(key=lambda row: row[0])
@@ -311,7 +367,7 @@ class ForecastCoordinator:
         eligible = []
         for ev in self.evs:
             try:
-                soc = current_soc(self.hass, ev["soc_sensor"])
+                soc = self._input(ev["soc_sensor"], "soc", now)
             except (ValueError, TypeError):
                 continue
             eligible.append((ev, soc))
@@ -330,8 +386,8 @@ class ForecastCoordinator:
             opt = self.options
             now = dt_util.utcnow()
             horizon = int(opt["horizon_hours"])
-            house = current_power(self.hass, opt["house_load"])
-            measured_ev = max(0.0, current_power(self.hass, opt["ev_power"]))
+            house = self._input(opt["house_load"], "power", now)
+            measured_ev = max(0.0, self._input(opt["ev_power"], "power", now))
             base_live = max(0.0, house - measured_ev)
             charging = measured_ev >= ACTIVE_THRESHOLD_KW
             if charging and self._active_since is None:
@@ -353,7 +409,7 @@ class ForecastCoordinator:
             local_now = dt_util.as_local(now)
             for ev in self.evs:
                 try:
-                    soc = current_soc(self.hass, ev["soc_sensor"])
+                    soc = self._input(ev["soc_sensor"], "soc", now)
                 except (ValueError, TypeError) as exc:
                     # Missing EV SoC -> assume no *future* charging demand for
                     # this EV. Do not let one unavailable MQTT sensor erase the
@@ -367,7 +423,7 @@ class ForecastCoordinator:
                         "expected_energy_kwh": 0.0,
                         "start": None, "active_assumed": False,
                         "identification": f"SoC unavailable; future EV charging omitted ({exc})",
-                        "soc_gains": {}, "away": state_is_away(self.hass, ev.get("away_sensor")),
+                        "soc_gains": {}, "away": self._input(ev["away_sensor"], "away", now) if ev.get("away_sensor") else None,
                         "candidate_sessions": [],
                         "learned_sessions": sum(
                             1 for session in self._sessions if session["ev_id"] == ev["id"]
@@ -381,7 +437,7 @@ class ForecastCoordinator:
                 ac_kwh = remaining_kwh / DEFAULT_EFFICIENCY
                 p_soc = soc_probability(soc, low, high, float(ev["probability_gamma"]))
                 active = ev["id"] == active_ev_id
-                away = state_is_away(self.hass, ev.get("away_sensor"))
+                away = self._input(ev["away_sensor"], "away", now) if ev.get("away_sensor") else None
                 identity = identification if active else "not charging"
                 candidate_info = []
                 if active:
@@ -461,6 +517,11 @@ class ForecastCoordinator:
                 self.status = f"Limited history: {coverage}"
             else:
                 self.status = f"OK: {coverage}"
+            if self._input_health:
+                self.status += "; inputs: " + ", ".join(
+                    f"{entity} {info['status']}"
+                    for entity, info in sorted(self._input_health.items())
+                )
             if unavailable_evs:
                 self.status += (
                     "; EV SoC unavailable, charging forecast omitted for: "
