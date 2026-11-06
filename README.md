@@ -1,6 +1,6 @@
 # unPlugged Forecast
 
-**v0.2.1 experimental** — Home Assistant / HACS integration for **EV-cleaned historical household load + SoC-informed EV session prediction**, with a forecast suitable for [HAEO](https://github.com/hass-energy/haeo).
+**v0.2.2 experimental** — Home Assistant / HACS integration for **EV-cleaned historical household load + SoC-informed EV session prediction**, with a forecast suitable for [HAEO](https://github.com/hass-energy/haeo).
 
 This is a **forecaster**, not an EV charger controller. It does not command chargers or batteries.
 
@@ -16,6 +16,7 @@ The setup asks for:
 - **Forecast horizon**: default 48 hours.
 - **Forecast resolution**: default 30 minutes (15/30/60 available).
 - **Live correction decay**: default 30 minutes (0 disables). Deviations of the current non-EV load from the historical baseline are added to the near-term projection with an exponential decay, instead of persisting for 48 hours.
+- **Sensor unavailable grace period**: default 10 minutes (0–120, 0 disables). The last valid house power, EV power, EV SoC and optional away reading is used during brief source outages. After expiry, existing missing-input handling applies. No reading ever extends its own grace period.
 
 Then open the integration's **Configure** (Options) and choose **Add an EV** for each car. Each EV includes:
 
@@ -38,9 +39,15 @@ Then open the integration's **Configure** (Options) and choose **Add an EV** for
 - **Load forecast** — e.g. `sensor.unplugged_forecast_load_forecast`; kW. The `forecast` attribute contains timestamped `{"time": "...", "value": 1.23}` points accepted by HAEO. The state is the live whole-house load.
 - **Live non-EV baseload** — current whole-house power minus measured EV charger power.
 - **Live EV charging load** — current combined EV charging power.
-- **Forecast status** — history coverage and errors.
+- **Forecast status** — history coverage, missing/stale input indicators and errors.
+
+The forecast sensor includes an `input_health` attribute, keyed by source entity ID, reporting `stale`, `expired`, or `missing`, age in seconds, and grace duration. A stale reading is never represented as a fresh SoC history sample. Restarting the integration clears the cache; a missing reading at startup cannot be invented.
 
 The forecast sensor also includes `ev_predictions` (per-EV current SoC, probability, AC energy to target, expected AC energy and assumed session start), as well as `matched_history_hours`.
+## v0.2.2 — resilient live sensor inputs
+
+This version adds a configurable grace period for temporary sensor outages, last-good-value hold with a firm expiry, and the `input_health` forecast attribute for troubleshooting. Default grace is 10 minutes. Once it expires, missing inputs follow the existing fallback behaviour. The forecast does not invent missing values after startup.
+
 ## v0.2.1 forecast stability fix
 
 This release addresses unstable HAEO load input and repeated re-optimizations seen when measured household and EV charging loads were stable.
