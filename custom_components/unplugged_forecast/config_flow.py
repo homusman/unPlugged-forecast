@@ -23,7 +23,7 @@ def main_schema(values=None):
             vol.All(vol.Coerce(int), vol.Range(min=1, max=30)),
         vol.Required("horizon_hours", default=data.get("horizon_hours", DEFAULT_HORIZON)):
             vol.All(vol.Coerce(int), vol.Range(min=6, max=72)),
-        vol.Required("interval_minutes", default=data.get("interval_minutes", DEFAULT_INTERVAL)):
+        vol.Required("interval_minutes", default=data.get("interval_minutes") or DEFAULT_INTERVAL):
             vol.In([15, 30, 60]),
         vol.Required("live_decay_minutes", default=data.get("live_decay_minutes", 30)):
             vol.All(vol.Coerce(int), vol.Range(min=0, max=240)),

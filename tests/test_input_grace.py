@@ -75,5 +75,21 @@ class InputGraceTest(unittest.TestCase):
         self.assertIsNone(self.c.read("binary_sensor.away", "away", self.t + timedelta(minutes=11)))
 
 
+class ForecastIntervalTest(unittest.TestCase):
+    def test_restart_uses_default_or_preserves_configured_interval(self):
+        method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "options")
+        scope = {"DEFAULT_INTERVAL": 30}
+        exec(compile(ast.Module(body=[method], type_ignores=[]), str(SOURCE), "exec"), scope)
+        for data, options, expected in (
+            ({}, {}, 30),
+            ({}, {"interval_minutes": None}, 30),
+            ({"interval_minutes": 15}, {"interval_minutes": ""}, 15),
+            ({"interval_minutes": 15}, {"interval_minutes": 60}, 60),
+        ):
+            with self.subTest(data=data, options=options):
+                coordinator = SimpleNamespace(entry=SimpleNamespace(data=data, options=options))
+                self.assertEqual(scope["options"].fget(coordinator)["interval_minutes"], expected)
+
+
 if __name__ == "__main__":
     unittest.main()

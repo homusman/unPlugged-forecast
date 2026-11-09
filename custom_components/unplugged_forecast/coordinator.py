@@ -15,7 +15,7 @@ from homeassistant.helpers.event import (
 )
 from homeassistant.util import dt as dt_util
 
-from .const import DEFAULT_EFFICIENCY
+from .const import DEFAULT_EFFICIENCY, DEFAULT_INTERVAL
 from .timeline import construct_forecast
 from .learning import (
     candidate_weights, extract_sessions, parse_series, power_multiplier,
@@ -115,7 +115,10 @@ class ForecastCoordinator:
 
     @property
     def options(self):
-        return {**self.entry.data, **self.entry.options}
+        options = {**self.entry.data, **self.entry.options}
+        if not options.get("interval_minutes"):
+            options["interval_minutes"] = self.entry.data.get("interval_minutes") or DEFAULT_INTERVAL
+        return options
 
     @property
     def evs(self):
