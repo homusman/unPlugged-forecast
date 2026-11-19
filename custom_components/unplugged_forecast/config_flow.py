@@ -23,8 +23,12 @@ def main_schema(values=None):
             vol.All(vol.Coerce(int), vol.Range(min=1, max=30)),
         vol.Required("horizon_hours", default=data.get("horizon_hours", DEFAULT_HORIZON)):
             vol.All(vol.Coerce(int), vol.Range(min=6, max=72)),
-        vol.Required("interval_minutes", default=data.get("interval_minutes") or DEFAULT_INTERVAL):
-            vol.In([15, 30, 60]),
+        vol.Required("interval_minutes", default=str(data.get("interval_minutes") or DEFAULT_INTERVAL)):
+            selector.SelectSelector(selector.SelectSelectorConfig(
+                options=[selector.SelectOptionDict(value=str(value), label=f"{value} minutes")
+                         for value in (15, 30, 60)],
+                mode=selector.SelectSelectorMode.LIST,
+            )),
         vol.Required("live_decay_minutes", default=data.get("live_decay_minutes", 30)):
             vol.All(vol.Coerce(int), vol.Range(min=0, max=240)),
         vol.Required("input_grace_minutes", default=data.get("input_grace_minutes", 10)):
@@ -67,7 +71,7 @@ class UnpluggedFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._abort_if_unique_id_configured()
             return self.async_create_entry(
                 title="unPlugged Forecast",
-                data={**user_input, "evs": []},
+                data={**user_input, "interval_minutes": int(user_input["interval_minutes"]), "evs": []},
             )
         return self.async_show_form(step_id="user", data_schema=main_schema())
 
@@ -89,6 +93,7 @@ class UnpluggedOptionsFlow(config_entries.OptionsFlow):
         if user_input is not None:
             opts = dict(self.config_entry.options)
             opts.update(user_input)
+            opts["interval_minutes"] = int(opts["interval_minutes"])
             return self.async_create_entry(title="", data=opts)
         return self.async_show_form(
             step_id="settings",

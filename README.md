@@ -149,3 +149,22 @@ HAEO's load forecasts use time/value pairs in kW:
 - Tests for missing data, daylight-saving transitions and HAEO interpolation.
 
 **No control commands** are issued by unPlugged Forecast.
+
+
+## Daily energy diagnostics
+
+**Daily baseline energy** is a diagnostic sensor in kWh: the sum of the 24 learned
+hourly non-EV baseline powers. It is unavailable until all 24 hours have history,
+and excludes predicted EV charging and live correction. This is a typical 24-hour
+profile, not a meter reading or a battery energy requirement.
+
+The **Load forecast** attributes include `forecast_interval_minutes` and
+`daily_forecast_energy`, keyed by local date. Each date reports `energy_kwh` and
+`coverage_hours`, integrating the remaining combined load forecast (including EVs
+and live correction). Today and the final date usually cover partial days. Daylight
+saving changes use actual elapsed hours. The terminal boundary adds no extra energy.
+
+The interval settings now use explicitly labeled string choices so the saved
+numeric setting appears selected when reopening the form. Saving keeps the stored
+interval numeric; forecasts and configured intervals are otherwise unchanged.
+

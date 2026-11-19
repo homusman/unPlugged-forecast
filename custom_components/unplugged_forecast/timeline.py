@@ -9,6 +9,31 @@ from datetime import datetime, timedelta, timezone
 import math
 
 
+def daily_forecast_energy(forecast, now, horizon_hours, localize):
+    """Integrate interval means within the remaining horizon by local date.
+
+    The final point is a boundary, not an extra interval. UTC arithmetic
+    preserves elapsed hours across daylight-saving transitions.
+    """
+    totals = {}
+    end = now + timedelta(hours=horizon_hours)
+    for point, following in zip(forecast, forecast[1:]):
+        start = max(now, datetime.fromisoformat(point["time"]))
+        stop = min(end, datetime.fromisoformat(following["time"]))
+        while start < stop:
+            local = localize(start)
+            midnight = datetime.combine(local.date() + timedelta(days=1), datetime.min.time(),
+                                        tzinfo=local.tzinfo).astimezone(timezone.utc)
+            boundary = min(stop, midnight)
+            hours = (boundary - start).total_seconds() / 3600
+            day = totals.setdefault(local.date().isoformat(), {"energy_kwh": 0.0, "coverage_hours": 0.0})
+            day["energy_kwh"] += float(point["value"]) * hours
+            day["coverage_hours"] += hours
+            start = boundary
+    return {date: {key: round(value, 3) for key, value in day.items()}
+            for date, day in totals.items()}
+
+
 def aligned_start(now: datetime, interval_minutes: int) -> datetime:
     """Return start of the UTC-aligned prediction interval containing now."""
     if now.tzinfo is None:

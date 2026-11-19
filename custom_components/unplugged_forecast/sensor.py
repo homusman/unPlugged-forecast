@@ -3,6 +3,9 @@ from __future__ import annotations
 
 from homeassistant.components.sensor import SensorEntity, SensorDeviceClass, SensorStateClass
 from .const import DOMAIN
+from .timeline import daily_forecast_energy
+from homeassistant.util import dt as dt_util
+from homeassistant.const import EntityCategory
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -12,6 +15,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
         UnpluggedSensor(coordinator, "baseload", "Live non-EV baseload"),
         UnpluggedSensor(coordinator, "ev_load", "Live EV charging load"),
         UnpluggedSensor(coordinator, "status", "Forecast status"),
+        UnpluggedSensor(coordinator, "daily_energy", "Daily baseline energy"),
     ])
 
 
@@ -25,7 +29,11 @@ class UnpluggedSensor(SensorEntity):
         self._attr_name = name
         self._attr_unique_id = f"{coordinator.entry.entry_id}_{key}"
         coordinator.add_listener(self)
-        if key != "status":
+        if key == "daily_energy":
+            self._attr_device_class = SensorDeviceClass.ENERGY
+            self._attr_native_unit_of_measurement = "kWh"
+            self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        elif key != "status":
             self._attr_device_class = SensorDeviceClass.POWER
             self._attr_native_unit_of_measurement = "kW"
             self._attr_state_class = SensorStateClass.MEASUREMENT
@@ -41,11 +49,16 @@ class UnpluggedSensor(SensorEntity):
 
     @property
     def available(self):
+        if self.key == "daily_energy":
+            baseline = self.coordinator._baseline
+            return bool(baseline) and all(value is not None for value in baseline)
         return self.key == "status" or self.coordinator.current_kw is not None
 
     @property
     def native_value(self):
         c = self.coordinator
+        if self.key == "daily_energy":
+            return round(sum(c._baseline), 3) if self.available else None
         if self.key == "forecast":
             return round(c.current_kw, 3) if c.current_kw is not None else None
         if self.key == "baseload":
@@ -57,6 +70,11 @@ class UnpluggedSensor(SensorEntity):
     @property
     def extra_state_attributes(self):
         c = self.coordinator
+        if self.key == "daily_energy":
+            return {
+                "profile_hours_available": sum(v is not None for v in (c._baseline or [])),
+                "description": "24-hour historical non-EV baseline; excludes EV forecasts and live correction",
+            }
         if self.key == "forecast":
             return {
                 "forecast": c.forecast,
@@ -65,5 +83,10 @@ class UnpluggedSensor(SensorEntity):
                 "matched_history_hours": c._history_count,
                 "updated_at": c.updated_at,
                 "input_health": c._input_health,
+                "forecast_interval_minutes": int(c.options["interval_minutes"]),
+                "daily_forecast_energy": daily_forecast_energy(
+                    c.forecast, dt_util.utcnow(), int(c.options.get("horizon_hours", 48)),
+                    dt_util.as_local,
+                ) if c.current_kw is not None else {},
             }
         return None

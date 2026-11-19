@@ -24,6 +24,16 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Test before publishing
+        run: |
+          python -m pip install homeassistant==2026.1.1
+          python -m unittest discover -s tests -v
+          python -m compileall -q custom_components
+
       - name: Generate a versioned release snapshot
         id: version
         shell: bash
