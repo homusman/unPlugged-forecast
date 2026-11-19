@@ -168,3 +168,19 @@ The interval settings now use explicitly labeled string choices so the saved
 numeric setting appears selected when reopening the form. Saving keeps the stored
 interval numeric; forecasts and configured intervals are otherwise unchanged.
 
+
+
+## History startup recovery
+
+History loading retries after startup failures or empty matched statistics, first
+after one minute, then with backoff to at most one retry per 15 minutes. Normal
+successful refreshes remain hourly. Empty/error responses preserve an existing
+learned profile and sessions. Retries stop when the integration unloads.
+
+The Load forecast sensor's `history_diagnostics` attribute reports the latest
+attempt/success, household and EV statistic-hour counts, overlapping hours returned,
+last error and next retry. Zero matched hours requires hourly mean power statistics
+for **both** configured power inputs at matching times; a visible Recorder history
+trace alone does not establish that these statistics exist. Missing input entities
+or units are reported explicitly. Forecast status includes the pending history
+error while live-input forecasting remains available.

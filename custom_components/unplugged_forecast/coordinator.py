@@ -96,6 +96,9 @@ class ForecastCoordinator:
         self._lock = asyncio.Lock()
         self._baseline = None
         self._history_count = 0
+        self.history_diagnostics = {"status": "waiting", "last_error": None}
+        self._history_failures = 0
+        self._history_retry_at = None
         self._sessions = []
         self._soc_history = {}
         self._live_soc = {}
@@ -232,6 +235,9 @@ class ForecastCoordinator:
             self.hass, self.async_refresh_history, timedelta(minutes=HISTORY_REFRESH_MINUTES)
         ))
         self._unsubs.append(async_track_time_interval(
+            self.hass, self._retry_history, timedelta(minutes=1)
+        ))
+        self._unsubs.append(async_track_time_interval(
             self.hass, self.async_publish, timedelta(minutes=5)
         ))
 
@@ -242,6 +248,12 @@ class ForecastCoordinator:
         if self._timer is not None:
             self._timer()
             self._timer = None
+
+    async def _retry_history(self, _now=None):
+        """Recover from startup ordering without waiting for the hourly refresh."""
+        due = self._history_retry_at is None or dt_util.utcnow() >= self._history_retry_at
+        if self.history_diagnostics["status"] != "ready" and due and not self._lock.locked():
+            await self.async_refresh_history()
 
     @callback
     def _source_changed(self, event):
@@ -287,6 +299,7 @@ class ForecastCoordinator:
             try:
                 opt = self.options
                 now = dt_util.utcnow()
+                self.history_diagnostics["last_attempt"] = now.isoformat()
                 days = int(opt["history_days"])
                 house_id, ev_id = opt["house_load"], opt["ev_power"]
                 ids = list({e["soc_sensor"] for e in self.evs})
@@ -306,6 +319,10 @@ class ForecastCoordinator:
                     raise ValueError("History sensors need W/kW/MW power units")
                 house = history_index(stats.get(house_id), house_factor)
                 ev_data = history_index(stats.get(ev_id), ev_factor)
+                self.history_diagnostics.update({
+                    "household_statistic_hours": len(house),
+                    "ev_statistic_hours": len(ev_data),
+                })
                 daily_hours = [[] for _ in range(24)]
                 recent_start = now - timedelta(days=days)
                 for at, h in house.items():
@@ -314,11 +331,18 @@ class ForecastCoordinator:
                     daily_hours[dt_util.as_local(at).hour].append(
                         max(0.0, h - max(0.0, ev_data[at]))
                     )
-                self._baseline = [
+                baseline = [
                     sum(samples) / len(samples) if samples else None
                     for samples in daily_hours
                 ]
-                self._history_count = sum(len(samples) for samples in daily_hours)
+                count = sum(len(samples) for samples in daily_hours)
+                self.history_diagnostics["matched_hours_returned"] = count
+                if not count:
+                    raise ValueError(
+                        f"No overlapping hourly power statistics in the last {days} days "
+                        f"(household {len(house)}, EV {len(ev_data)}); "
+                        "check Recorder inclusion and measurement statistics for both inputs"
+                    )
 
                 power_rows = [
                     (stamp, value * ev_factor)
@@ -335,7 +359,23 @@ class ForecastCoordinator:
                 }
                 self._sessions = extract_sessions(power_rows, soc_history)
                 self._soc_history = soc_history
+                self._baseline = baseline
+                self._history_count = count
+                self.history_diagnostics.update({
+                    "status": "ready", "last_error": None,
+                    "last_success": now.isoformat(),
+                    "next_retry": None,
+                })
+                self._history_failures = 0
+                self._history_retry_at = None
             except Exception as exc:
+                delay = min(15, 2 ** min(self._history_failures, 4))
+                self._history_failures += 1
+                self._history_retry_at = dt_util.utcnow() + timedelta(minutes=delay)
+                self.history_diagnostics.update({
+                    "status": "retrying", "last_error": str(exc),
+                    "next_retry": self._history_retry_at.isoformat(),
+                })
                 _LOGGER.warning("Unable to refresh load/session history: %s", exc)
                 # Retain last valid learned data rather than silently
                 # overwriting it with a new empty model.
@@ -520,6 +560,8 @@ class ForecastCoordinator:
                 self.status = f"Limited history: {coverage}"
             else:
                 self.status = f"OK: {coverage}"
+            if self.history_diagnostics["status"] == "retrying":
+                self.status += "; history retry pending: " + self.history_diagnostics["last_error"]
             if self._input_health:
                 self.status += "; inputs: " + ", ".join(
                     f"{entity} {info['status']}"

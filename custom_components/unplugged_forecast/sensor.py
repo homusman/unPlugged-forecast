@@ -83,6 +83,7 @@ class UnpluggedSensor(SensorEntity):
                 "matched_history_hours": c._history_count,
                 "updated_at": c.updated_at,
                 "input_health": c._input_health,
+                "history_diagnostics": dict(c.history_diagnostics),
                 "forecast_interval_minutes": int(c.options["interval_minutes"]),
                 "daily_forecast_energy": daily_forecast_energy(
                     c.forecast, dt_util.utcnow(), int(c.options.get("horizon_hours", 48)),
