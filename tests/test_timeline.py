@@ -13,6 +13,20 @@ UTC = timezone.utc
 
 
 class TimelineTest(unittest.TestCase):
+    def test_inertia_projects_for_hours_without_changing_ev_energy(self):
+        forecast = timeline.construct_forecast(
+            now=datetime(2026, 11, 22, tzinfo=UTC), horizon_hours=6,
+            interval_minutes=30, base_by_hour=[1.0] * 24, live_non_ev_kw=4,
+            sessions=[], localize=lambda t: t, decay_minutes=0, actual_house_kw=4,
+            correction_kw=0.8, correction_horizon_hours=3,
+        )
+        self.assertEqual(forecast[0]["value"], 1.8)
+        self.assertEqual(forecast[4]["value"], 1.6)
+        self.assertEqual(forecast[5]["value"], 1.2)
+        self.assertEqual(forecast[6]["value"], 1.0)
+        self.assertEqual(forecast[-1]["value"], 1.0)
+        self.assertAlmostEqual(sum(point["value"] - 1 for point in forecast[:-1]) * 0.5, 2)
+
     def test_stable_grid_independent_of_refresh_second(self):
         a = datetime(2026, 11, 6, 4, 1, 5, tzinfo=UTC)
         b = a + timedelta(seconds=20)

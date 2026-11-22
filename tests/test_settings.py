@@ -26,3 +26,16 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(field["default"], str(saved or 30))
             choices = field["selector"]["select"]["options"]
             self.assertIn(field["default"], [option["value"] for option in choices])
+
+    def test_inertia_settings_have_defaults_and_preserve_legacy_modes(self):
+        package = ModuleType("unplugged_inertia_settings_test")
+        package.__path__ = [str(Path(__file__).parents[1] / "custom_components/unplugged_forecast")]
+        sys.modules[package.__name__] = package
+        flow = importlib.import_module(package.__name__ + ".config_flow")
+        for saved, mode in ((None, "inertia"), ({"live_decay_minutes": 0}, "none"),
+                            ({"live_decay_minutes": 30}, "decay")):
+            fields = voluptuous_serialize.convert(flow.main_schema(saved), custom_serializer=cv.custom_serializer)
+            by_name = {field["name"]: field for field in fields}
+            self.assertEqual(by_name["live_correction_mode"]["default"], mode)
+            self.assertEqual(by_name["inertia_response_minutes"]["default"], 20)
+            self.assertEqual(by_name["inertia_horizon_hours"]["default"], 3)

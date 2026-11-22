@@ -184,3 +184,51 @@ for **both** configured power inputs at matching times; a visible Recorder histo
 trace alone does not establish that these statistics exist. Missing input entities
 or units are reported explicitly. Forecast status includes the pending history
 error while live-input forecasting remains available.
+
+
+## Inertia-based live load correction
+
+Open Configure → Forecast settings → **Live-load correction mode → Inertia**.
+Existing installations retain their previous correction mode until changed;
+legacy decay=0 remains Historical baseline only. New setups default to Inertia.
+The legacy decay constant is ignored in Inertia mode and may remain zero.
+
+Inertia learns the difference between measured household power **minus measured
+EV charging power** and the learned baseline at the current local hour. A
+fast smoother (one quarter of the selected learning time constant) feeds a slow
+smoother. This rejects brief spikes without a hard on/off persistence threshold.
+The integration accounts for elapsed time, not the number of sensor updates,
+and never applies a new sample retroactively to the previous interval.
+
+Defaults:
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| Learning time constant | 20 minutes | Slow stage; fast stage is 5 minutes |
+| Forecast adjustment window | 3 hours | Full learned offset for 2 hours, then a 1-hour taper to zero |
+| Correction deadband | 0.1 kW | Subtract the first 100 W of smoothed deviation in either direction |
+| Maximum correction | 3 kW | Bound the applied upward or downward adjustment |
+
+With a sustained 1 kW baseline underestimate, default corrections are roughly
++0.42 kW after 20 minutes, +0.72 kW after 40 minutes and +0.83 kW after an hour.
+A 1.5 kW, three-minute pulse produces less than 0.06 kW peak correction in the
+regression scenario. These are examples, not guarantees for every load pattern.
+
+The future correction is an interval mean, tapers out within its selected window,
+and does not alter the rest of the historical daily shape. Predicted EV sessions
+remain separate. Negative corrected household forecasts are clamped to zero.
+The sensor's main state remains measured total household power.
+
+Inertia publishes on significant forecast changes using the existing 100 W
+notification threshold, with a one-minute learning timer. Learning pauses when
+house/EV readings are served from the unavailable-input grace cache or the current
+baseline hour is unknown. Gaps longer than five minutes reset the estimate.
+Restart/reload starts a fresh learning period; the offset is not persisted.
+
+The Load forecast sensor's `live_correction` attribute reports the mode, current
+fresh residual, smoothed bias, applied correction, learning status and projection
+window. It supplements the daily energy and input-health diagnostics.
+
+This changes the forecast supplied to HAEO. HAEO's configured acceptance gate
+still decides when a new schedule replaces the accepted plan; a forecast update
+does not guarantee an immediate battery command change.

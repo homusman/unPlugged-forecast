@@ -6,6 +6,7 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.helpers import selector
+from .inertia import correction_mode
 
 from .const import (
     DOMAIN, DEFAULT_DAYS, DEFAULT_HORIZON, DEFAULT_INTERVAL,
@@ -29,6 +30,20 @@ def main_schema(values=None):
                          for value in (15, 30, 60)],
                 mode=selector.SelectSelectorMode.LIST,
             )),
+        vol.Required("live_correction_mode", default=correction_mode(data) if data else "inertia"):
+            selector.SelectSelector(selector.SelectSelectorConfig(options=[
+                selector.SelectOptionDict(value="none", label="Historical baseline only"),
+                selector.SelectOptionDict(value="inertia", label="Inertia: learn sustained load changes"),
+                selector.SelectOptionDict(value="decay", label="Legacy instant correction with decay"),
+            ])),
+        vol.Required("inertia_response_minutes", default=data.get("inertia_response_minutes", 20)):
+            vol.All(vol.Coerce(float), vol.Range(min=5, max=240)),
+        vol.Required("inertia_horizon_hours", default=data.get("inertia_horizon_hours", 3)):
+            vol.All(vol.Coerce(float), vol.Range(min=0.5, max=12)),
+        vol.Required("inertia_deadband_kw", default=data.get("inertia_deadband_kw", 0.1)):
+            vol.All(vol.Coerce(float), vol.Range(min=0, max=2)),
+        vol.Required("inertia_maximum_kw", default=data.get("inertia_maximum_kw", 3)):
+            vol.All(vol.Coerce(float), vol.Range(min=0.1, max=30)),
         vol.Required("live_decay_minutes", default=data.get("live_decay_minutes", 30)):
             vol.All(vol.Coerce(int), vol.Range(min=0, max=240)),
         vol.Required("input_grace_minutes", default=data.get("input_grace_minutes", 10)):

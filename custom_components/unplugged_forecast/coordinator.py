@@ -17,6 +17,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import DEFAULT_EFFICIENCY, DEFAULT_INTERVAL
 from .timeline import construct_forecast
+from .inertia import LoadInertia, correction_mode
 from .learning import (
     candidate_weights, extract_sessions, parse_series, power_multiplier,
     recent_soc_delta, soc_probability,
@@ -115,6 +116,8 @@ class ForecastCoordinator:
         self.status = "Waiting for history"
         self.updated_at = None
         self._last_emitted = None
+        self._inertia = LoadInertia()
+        self.correction_diagnostics = {}
 
     @property
     def options(self):
@@ -240,6 +243,13 @@ class ForecastCoordinator:
         self._unsubs.append(async_track_time_interval(
             self.hass, self.async_publish, timedelta(minutes=5)
         ))
+        self._unsubs.append(async_track_time_interval(
+            self.hass, self._inertia_tick, timedelta(minutes=1)
+        ))
+
+    async def _inertia_tick(self, _now=None):
+        if correction_mode(self.options) == "inertia":
+            await self.async_publish()
 
     async def async_stop(self):
         for unsub in self._unsubs:
@@ -432,6 +442,26 @@ class ForecastCoordinator:
             house = self._input(opt["house_load"], "power", now)
             measured_ev = max(0.0, self._input(opt["ev_power"], "power", now))
             base_live = max(0.0, house - measured_ev)
+            mode = correction_mode(opt)
+            historical = self._baseline[dt_util.as_local(now).hour] if self._baseline else None
+            fresh = all(entity not in self._input_health for entity in (opt["house_load"], opt["ev_power"]))
+            residual = base_live - historical if historical is not None and fresh else None
+            correction = 0.0
+            if mode == "inertia":
+                correction = self._inertia.update(
+                    now, residual,
+                    response_minutes=float(opt.get("inertia_response_minutes", 20)),
+                    deadband_kw=float(opt.get("inertia_deadband_kw", 0.1)),
+                    maximum_kw=float(opt.get("inertia_maximum_kw", 3)),
+                )
+            self.correction_diagnostics = {
+                "mode": mode,
+                "residual_kw": round(residual, 3) if residual is not None else None,
+                "smoothed_bias_kw": round(self._inertia.bias_kw, 3),
+                "applied_correction_kw": round(correction, 3),
+                "learning": self._inertia.learning if mode == "inertia" else False,
+                "projection_hours": float(opt.get("inertia_horizon_hours", 3)) if mode == "inertia" else 0,
+            }
             charging = measured_ev >= ACTIVE_THRESHOLD_KW
             if charging and self._active_since is None:
                 # Recorder can supply more accurate start through session history.
@@ -546,8 +576,10 @@ class ForecastCoordinator:
                 live_non_ev_kw=base_live,
                 sessions=sessions,
                 localize=dt_util.as_local,
-                decay_minutes=float(opt.get("live_decay_minutes", 30)),
+                decay_minutes=float(opt.get("live_decay_minutes", 30)) if mode == "decay" else 0,
                 actual_house_kw=house,
+                correction_kw=correction,
+                correction_horizon_hours=float(opt.get("inertia_horizon_hours", 3)),
             )
             self.current_kw = house
             self.baseload_kw = base_live
@@ -573,6 +605,8 @@ class ForecastCoordinator:
                     + ", ".join(unavailable_evs)
                 )
         except Exception as exc:
+            self._inertia.update(dt_util.utcnow(), None)
+            self.correction_diagnostics.update(learning=False, last_error=str(exc))
             self.status = f"Unavailable: {exc}"
             self.forecast = []
             self.current_kw = None

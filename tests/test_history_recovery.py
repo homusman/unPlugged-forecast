@@ -63,3 +63,30 @@ class HistoryRecoveryTests(unittest.IsolatedAsyncioTestCase):
         async with self.c._lock:
             await self.c._retry_history()
         self.c.async_refresh_history.assert_not_awaited()
+
+    async def test_inertia_learns_non_ev_load_and_ignores_ev_power(self):
+        from datetime import timedelta
+        states = {"sensor.house": 2, "sensor.ev": 0}
+        self.c.hass.states.get = lambda entity: SimpleNamespace(
+            state=str(states[entity]), attributes={"unit_of_measurement": "kW"})
+        self.c.entry.data.update(horizon_hours=6, interval_minutes=30,
+                                 live_correction_mode="inertia", live_decay_minutes=0)
+        self.c._baseline = [1] * 24
+        self.c._history_count = 578
+        # Use the real publishing path rather than the history-test stub.
+        publish = self.module.ForecastCoordinator.async_publish
+        start = self.module.dt_util.utcnow()
+        for minute in range(41):
+            with patch.object(self.module.dt_util, "utcnow", return_value=start + timedelta(minutes=minute)):
+                await publish(self.c)
+        self.assertEqual(self.c.current_kw, 2)
+        self.assertGreater(self.c.forecast[0]["value"], 1.65)
+        self.assertEqual(self.c.forecast[-1]["value"], 1)
+        self.assertTrue(self.c.correction_diagnostics["learning"])
+        state_type = type(self.c._inertia)
+        self.c._inertia = state_type()
+        states["sensor.ev"] = 1  # Entire deviation is now measured EV demand.
+        for minute in range(41, 81):
+            with patch.object(self.module.dt_util, "utcnow", return_value=start + timedelta(minutes=minute)):
+                await publish(self.c)
+        self.assertEqual(self.c.correction_diagnostics["applied_correction_kw"], 0)

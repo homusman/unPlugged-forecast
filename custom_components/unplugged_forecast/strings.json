@@ -11,8 +11,21 @@
           "history_days": "Historical averaging window (days)",
           "horizon_hours": "Forecast horizon (hours)",
           "interval_minutes": "Forecast interval (minutes)",
-          "live_decay_minutes": "Short-term live-load correction decay (minutes, 0 disables)",
-          "input_grace_minutes": "Sensor unavailable grace period (minutes; 0 disables)"
+          "live_decay_minutes": "Legacy decay time constant (minutes; decay mode only)",
+          "input_grace_minutes": "Sensor unavailable grace period (minutes; 0 disables)",
+          "live_correction_mode": "Live-load correction mode",
+          "inertia_response_minutes": "Inertia learning time constant (minutes)",
+          "inertia_horizon_hours": "Inertia forecast adjustment window (hours)",
+          "inertia_deadband_kw": "Inertia correction deadband (kW)",
+          "inertia_maximum_kw": "Maximum inertia correction (kW)"
+        },
+        "data_description": {
+          "live_correction_mode": "Inertia learns sustained non-EV load deviations. Historical baseline only disables live correction. Legacy decay reacts immediately to each reading.",
+          "inertia_response_minutes": "Inertia mode only. Larger values reject brief spikes more strongly but adapt more slowly. A two-stage smoother uses this time constant and a faster stage at one quarter of it.",
+          "inertia_horizon_hours": "Inertia mode only. Apply the learned offset across the first two-thirds of this future window, then taper it to zero over the final third. The rest of the horizon stays historical.",
+          "inertia_deadband_kw": "Inertia mode only. Ignore this amount of the learned offset in either direction; 0.1 kW means 100 W. The smooth deadband reduces chatter.",
+          "inertia_maximum_kw": "Inertia mode only. Bound the positive or negative correction. Forecast power is never allowed below zero.",
+          "live_decay_minutes": "Used only by Legacy instant correction with decay. It has no effect in Inertia mode, so it may remain 0."
         }
       }
     }
@@ -35,8 +48,21 @@
           "history_days": "Historical days to average",
           "horizon_hours": "Forecast horizon (hours)",
           "interval_minutes": "Forecast interval (minutes)",
-          "live_decay_minutes": "Short-term live-load correction decay (minutes, 0 disables)",
-          "input_grace_minutes": "Sensor unavailable grace period (minutes; 0 disables)"
+          "live_decay_minutes": "Legacy decay time constant (minutes; decay mode only)",
+          "input_grace_minutes": "Sensor unavailable grace period (minutes; 0 disables)",
+          "live_correction_mode": "Live-load correction mode",
+          "inertia_response_minutes": "Inertia learning time constant (minutes)",
+          "inertia_horizon_hours": "Inertia forecast adjustment window (hours)",
+          "inertia_deadband_kw": "Inertia correction deadband (kW)",
+          "inertia_maximum_kw": "Maximum inertia correction (kW)"
+        },
+        "data_description": {
+          "live_correction_mode": "Inertia learns sustained non-EV load deviations. Historical baseline only disables live correction. Legacy decay reacts immediately to each reading.",
+          "inertia_response_minutes": "Inertia mode only. Larger values reject brief spikes more strongly but adapt more slowly. A two-stage smoother uses this time constant and a faster stage at one quarter of it.",
+          "inertia_horizon_hours": "Inertia mode only. Apply the learned offset across the first two-thirds of this future window, then taper it to zero over the final third. The rest of the horizon stays historical.",
+          "inertia_deadband_kw": "Inertia mode only. Ignore this amount of the learned offset in either direction; 0.1 kW means 100 W. The smooth deadband reduces chatter.",
+          "inertia_maximum_kw": "Inertia mode only. Bound the positive or negative correction. Forecast power is never allowed below zero.",
+          "live_decay_minutes": "Used only by Legacy instant correction with decay. It has no effect in Inertia mode, so it may remain 0."
         }
       },
       "add_ev": {

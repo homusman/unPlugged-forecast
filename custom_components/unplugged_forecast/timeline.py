@@ -9,6 +9,19 @@ from datetime import datetime, timedelta, timezone
 import math
 
 
+def projection_average(start_hours, end_hours, horizon_hours):
+    """Average the flat-then-tapered correction over a forecast interval."""
+    if horizon_hours <= 0 or end_hours <= start_hours:
+        return 0.0
+    plateau = horizon_hours * 2 / 3
+    def integral(time):
+        if time <= plateau:
+            return time
+        time = min(time, horizon_hours) - plateau
+        return plateau + time - 1.5 * time * time / horizon_hours
+    return (integral(end_hours) - integral(start_hours)) / (end_hours - start_hours)
+
+
 def daily_forecast_energy(forecast, now, horizon_hours, localize):
     """Integrate interval means within the remaining horizon by local date.
 
@@ -67,6 +80,7 @@ def construct_forecast(
     base_by_hour: list[float | None] | None, live_non_ev_kw: float,
     sessions: list[dict], localize, decay_minutes: float,
     actual_house_kw: float,
+    correction_kw: float = 0.0, correction_horizon_hours: float = 3.0,
 ) -> list[dict]:
     """Build forecast on a stable UTC grid without an artificial first-point jump.
 
@@ -98,6 +112,10 @@ def construct_forecast(
             # Do not decay backwards into the past portion of the first bucket.
             minutes = max(0.0, (start - anchor).total_seconds() / 60)
             base += residual * math.exp(-minutes / decay_minutes)
+        if value is not None:
+            lead = (start - now).total_seconds() / 3600
+            end_lead = (end - now).total_seconds() / 3600
+            base += correction_kw * projection_average(lead, end_lead, correction_horizon_hours)
         ev_kw = session_kw(start, end, sessions)
         # The current bucket should be a prediction of ongoing demand rather
         # than an artificially low average of the elapsed part of the bucket.

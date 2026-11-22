@@ -79,5 +79,6 @@ jobs:
           gh release create "v${{ steps.version.outputs.version }}" \
             --repo "${{ github.repository }}" \
             --title "v${{ steps.version.outputs.version }}" \
+            --notes-file docs/release-notes.md \
             --generate-notes \
             --latest
