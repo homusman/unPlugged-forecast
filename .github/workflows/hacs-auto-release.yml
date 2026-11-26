@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "custom_components/**"
+      - "tests/**"
       - ".github/workflows/hacs-auto-release.yml"
   workflow_dispatch:
 

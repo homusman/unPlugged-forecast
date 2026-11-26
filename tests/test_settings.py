@@ -47,10 +47,11 @@ class SettingsTests(unittest.TestCase):
         sys.modules[package.__name__] = package
         flow = importlib.import_module(package.__name__ + ".config_flow")
         for entity in ("sensor.tesla_limit", "number.tesla_limit"):
-            fields = voluptuous_serialize.convert(flow.ev_schema({"charge_limit_sensor": entity}),
-                                                  custom_serializer=cv.custom_serializer)
+            schema = flow.ev_schema({"charge_limit_sensor": entity})
+            fields = voluptuous_serialize.convert(schema, custom_serializer=cv.custom_serializer)
             field = next(f for f in fields if f["name"] == "charge_limit_sensor")
-            self.assertEqual(field["suggested_value"], entity)
+            marker = next(key for key in schema.schema if key.schema == "charge_limit_sensor")
+            self.assertEqual(marker.description["suggested_value"], entity)
             self.assertEqual(field["selector"]["entity"]["domain"], ["sensor", "number"])
         values = {"soc_sensor": "sensor.soc"}
         self.assertNotIn("charge_limit_sensor", flow.ev_schema({"charge_limit_sensor": "sensor.old"})(values))
