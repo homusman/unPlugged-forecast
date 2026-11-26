@@ -62,6 +62,8 @@ def ev_schema(values=None):
             vol.All(vol.Coerce(float), vol.Range(min=1, max=250)),
         vol.Required("soc_sensor", default=data.get("soc_sensor", "")):
             selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
+        vol.Optional("charge_limit_sensor", description={"suggested_value": data.get("charge_limit_sensor")}):
+            selector.EntitySelector(selector.EntitySelectorConfig(domain=["sensor", "number"])),
         vol.Optional("away_sensor", description={"suggested_value": data.get("away_sensor")}):
             selector.EntitySelector(selector.EntitySelectorConfig(
                 domain=["binary_sensor", "device_tracker"]

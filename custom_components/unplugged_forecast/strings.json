@@ -76,7 +76,11 @@
           "charge_power_kw": "Assumed AC charging power (kW)",
           "start_hour": "Assumed next charging hour (local time, 0–23)",
           "probability_gamma": "Probability curve exponent",
-          "away_sensor": "Optional away status (binary sensor or device tracker)"
+          "away_sensor": "Optional away status (binary sensor or device tracker)",
+          "charge_limit_sensor": "Optional charge limit entity (%)"
+        },
+        "data_description": {
+          "charge_limit_sensor": "Use a sensor or number reporting the EV charge target as 0–100%. Overrides Typical maximum SoC for session energy and probability. If unavailable, use the input grace period, then fall back to Typical maximum SoC. This entity is read only."
         }
       },
       "edit_ev": {
@@ -96,7 +100,11 @@
           "charge_power_kw": "Assumed AC charging power (kW)",
           "start_hour": "Assumed next charging hour (local time, 0–23)",
           "probability_gamma": "Probability curve exponent",
-          "away_sensor": "Optional away status (binary sensor or device tracker)"
+          "away_sensor": "Optional away status (binary sensor or device tracker)",
+          "charge_limit_sensor": "Optional charge limit entity (%)"
+        },
+        "data_description": {
+          "charge_limit_sensor": "Use a sensor or number reporting the EV charge target as 0–100%. Overrides Typical maximum SoC for session energy and probability. If unavailable, use the input grace period, then fall back to Typical maximum SoC. This entity is read only."
         }
       },
       "remove_ev": {

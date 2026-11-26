@@ -1,22 +1,11 @@
-# unPlugged Forecast v0.2.12 — inertia-based load adaptation
+# unPlugged Forecast v0.2.13 — live EV charge targets
 
-Adds an optional Inertia live-load correction mode. Sustained measured non-EV
-load deviations gradually adjust the next few forecast hours; brief appliance
-spikes have much less influence than immediate live correction.
+Adds an optional charge-limit sensor or number entity to each EV. Configure → Edit EV → Charge limit entity (%) accepts the Tesla integration's live 0–100% charge target. It overrides the configured maximum for remaining charging energy and upcoming-session probability, including temporary higher charge targets.
 
-Select Configure → Forecast settings → Live-load correction mode → Inertia.
-Start with 20-minute learning time constant, 3-hour forecast window, 0.1 kW
-deadband and 3 kW maximum correction. Legacy decay may remain 0 in this mode.
-Existing installations keep their old mode until explicitly changed.
+Active sessions use measured EVSE power rather than the configured assumed rate. A rate change recalculates the remaining duration while preserving energy needed to reach the live target. Charge-rate and target changes now bypass the household forecast's 100 W notification threshold; source events retain the existing 20-second debounce. Future sessions still use configured assumed power until charging is detected.
 
-The correction holds for the first two-thirds of its forecast window and tapers
-to zero over the final third. EV charging remains separate. Diagnostics show the
-measured residual, smoothed bias and applied offset. Stale data does not train the
-estimate. Restart/reload resets learning; allow time for it to build again.
+The live limit uses the existing input grace period during unavailable states, then falls back to the configured maximum. A valid target already reached no longer creates the one-hour provisional charging forecast. Diagnostics expose target value/source, selected entity, charging power/source and estimated remaining hours. Charging energy retains the existing 90% AC efficiency assumption.
 
-Regression coverage includes microwave pulses versus sustained loads, event-rate
-independence, stale readings and gaps, negative/bounded corrections, forecast
-energy accounting, EV subtraction and Home Assistant settings serialization.
+Update in HACS and restart Home Assistant Core, then edit the EV to select its charge-limit entity. No entity is selected automatically; existing configurations retain their target behavior. The integration reads the selected entity only and does not change the Tesla's charge limit or charge rate.
 
-Update through HACS and restart Home Assistant. HAEO's acceptance rules and
-actuator dispatch behavior are unchanged.
+Tests cover live targets, invalid states, bounded grace/recovery, rate changes, target reached, event subscription, optional field clearing and existing forecasting behavior. For rollback, reinstall v0.2.12 through HACS and restart Core.

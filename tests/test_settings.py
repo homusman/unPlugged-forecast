@@ -39,3 +39,18 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(by_name["live_correction_mode"]["default"], mode)
             self.assertEqual(by_name["inertia_response_minutes"]["default"], 20)
             self.assertEqual(by_name["inertia_horizon_hours"]["default"], 3)
+
+
+    def test_optional_charge_limit_accepts_sensor_or_number_and_can_be_cleared(self):
+        package = ModuleType("unplugged_charge_settings_test")
+        package.__path__ = [str(Path(__file__).parents[1] / "custom_components/unplugged_forecast")]
+        sys.modules[package.__name__] = package
+        flow = importlib.import_module(package.__name__ + ".config_flow")
+        for entity in ("sensor.tesla_limit", "number.tesla_limit"):
+            fields = voluptuous_serialize.convert(flow.ev_schema({"charge_limit_sensor": entity}),
+                                                  custom_serializer=cv.custom_serializer)
+            field = next(f for f in fields if f["name"] == "charge_limit_sensor")
+            self.assertEqual(field["suggested_value"], entity)
+            self.assertEqual(field["selector"]["entity"]["domain"], ["sensor", "number"])
+        values = {"soc_sensor": "sensor.soc"}
+        self.assertNotIn("charge_limit_sensor", flow.ev_schema({"charge_limit_sensor": "sensor.old"})(values))

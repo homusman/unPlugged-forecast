@@ -232,3 +232,15 @@ window. It supplements the daily energy and input-health diagnostics.
 This changes the forecast supplied to HAEO. HAEO's configured acceptance gate
 still decides when a new schedule replaces the accepted plan; a forecast update
 does not guarantee an immediate battery command change.
+
+## Live EV charge limits and measured charging power
+
+In Configure → Edit EV, select the optional **Charge limit entity (%)** from the Tesla integration (a sensor or number entity). Its 0–100% value overrides Typical maximum SoC for current/upcoming session energy and charging probability. It can be above or below the configured maximum. No commands are sent to the vehicle.
+
+Remaining battery energy is `max(0, target SoC - current SoC) / 100 × usable capacity`. The forecast converts this to AC energy using the existing 90% charging efficiency assumption. Before charging starts it uses configured assumed charging power; once detected it uses measured total EVSE charging power, recalculating duration whenever that measurement changes. Source events are debounced for 20 seconds. Active rate and target changes bypass the household forecast's 100 W notification deadband.
+
+A valid live limit already reached means no further predicted charging energy, rather than the one-hour provisional estimate used when the target is unknown. An unavailable/invalid limit uses the last valid reading for the configured input grace period, then falls back to Typical maximum SoC. Recovery is automatic, and the independent household forecast remains available.
+
+EV diagnostics include `target_soc`, `target_source`, `charge_limit_entity`, `charge_power_kw`, `charge_power_source` and `estimated_remaining_hours`. The power input is the existing EV charging power entity; with multiple EVs it is still an aggregate measurement attributed using the existing session-identification logic.
+
+Leave the optional entity empty to retain configured-target behavior. Clearing it in Edit EV removes the mapping. Reinstall v0.2.12 and restart Core to roll back.

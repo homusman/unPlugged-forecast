@@ -90,3 +90,83 @@ class HistoryRecoveryTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(self.module.dt_util, "utcnow", return_value=start + timedelta(minutes=minute)):
                 await publish(self.c)
         self.assertEqual(self.c.correction_diagnostics["applied_correction_kw"], 0)
+
+
+    def configure_charging_ev(self, power=0, soc=50, target=80):
+        self.states = {"sensor.house": 1 + power, "sensor.ev": power,
+                       "sensor.soc": soc, "number.limit": target}
+        self.c.hass.states.get = lambda entity: SimpleNamespace(
+            state=str(self.states[entity]), attributes={"unit_of_measurement": "kW"})
+        self.c.entry.data.update(horizon_hours=24, interval_minutes=30, live_correction_mode="none",
+                                evs=[{"id": "car", "name": "Tesla", "soc_sensor": "sensor.soc",
+                                      "charge_limit_sensor": "number.limit", "min_soc": 20,
+                                      "max_soc": 70, "capacity_kwh": 60, "charge_power_kw": 7,
+                                      "start_hour": 18, "probability_gamma": 2}])
+        self.c._baseline = [1] * 24
+        self.c._history_count = 24
+        self.now = self.module.dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+
+    async def publish_charge(self, minutes=0):
+        from datetime import timedelta
+        with patch.object(self.module.dt_util, "utcnow", return_value=self.now + timedelta(minutes=minutes)):
+            await self.module.ForecastCoordinator.async_publish(self.c)
+        self.assertTrue(self.c.forecast, self.c.status)
+        return self.c.ev_details[0]
+
+    async def test_live_limit_and_evse_rate_changes_update_active_session(self):
+        self.configure_charging_ev()
+        info = await self.publish_charge()
+        self.assertEqual(info["target_soc"], 80)
+        self.assertEqual(info["energy_to_target_kwh"], 20)
+        self.assertEqual(info["charge_power_kw"], 7)
+        for minute, power in ((1, 6), (2, 3), (3, 2.95)):
+            self.states.update({"sensor.ev": power, "sensor.house": 1 + power})
+            with patch.object(self.module, "construct_forecast", wraps=self.module.construct_forecast) as build:
+                info = await self.publish_charge(minute)
+            session = build.call_args.kwargs["sessions"][0]
+            self.assertEqual(session["power"], power)
+            self.assertAlmostEqual((session["end"] - session["start"]).total_seconds() / 3600, 20 / power)
+            self.assertEqual(info["charge_power_source"], "measured EVSE")
+            self.assertEqual(info["energy_to_target_kwh"], 20)
+            self.assertEqual(info["charge_power_kw"], power)
+        self.states["number.limit"] = 90
+        info = await self.publish_charge(4)
+        self.assertEqual(info["target_soc"], 90)
+        self.assertAlmostEqual(info["energy_to_target_kwh"], 26.67, places=2)
+        self.states["sensor.soc"] = 90
+        info = await self.publish_charge(5)
+        self.assertEqual(info["energy_to_target_kwh"], 0)
+        self.assertEqual(info["estimated_remaining_hours"], 0)
+        self.assertNotIn("provisional", info["identification"])
+
+    async def test_charge_limit_grace_fallback_and_recovery_preserve_household(self):
+        self.configure_charging_ev(power=3)
+        self.assertEqual((await self.publish_charge())["target_soc"], 80)
+        self.states["number.limit"] = "unavailable"
+        info = await self.publish_charge(5)
+        self.assertEqual(info["target_soc"], 80)
+        self.assertEqual(info["target_source"], "cached charge limit")
+        info = await self.publish_charge(11)
+        self.assertEqual(info["target_soc"], 70)
+        self.assertEqual(info["target_source"], "configured fallback")
+        self.states["number.limit"] = 60
+        self.assertEqual((await self.publish_charge(12))["target_soc"], 60)
+        self.assertNotIn("number.limit", self.c._input_health)
+
+    async def test_charge_limit_changes_are_watched(self):
+        self.configure_charging_ev()
+        self.c.async_refresh_history = AsyncMock()
+        with patch.object(self.module, "async_track_state_change_event", return_value=lambda: None) as watch, \
+             patch.object(self.module, "async_track_time_interval", return_value=lambda: None):
+            await self.c.async_start()
+        self.assertIn("number.limit", watch.call_args.args[1])
+        await self.c.async_stop()
+
+    async def test_charge_rate_changes_below_household_deadband_still_publish(self):
+        self.configure_charging_ev(power=3)
+        listener = SimpleNamespace(hass=True, async_write_ha_state=unittest.mock.Mock())
+        self.c.listeners.append(listener)
+        await self.publish_charge()
+        self.states.update({"sensor.ev": 2.95, "sensor.house": 3.95})
+        await self.publish_charge()
+        self.assertEqual(listener.async_write_ha_state.call_count, 2)

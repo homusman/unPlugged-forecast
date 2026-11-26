@@ -171,6 +171,18 @@ class ForecastCoordinator:
         self._input_health.pop(entity_id, None)
         return value
 
+    def _charge_target(self, ev, now):
+        """Use the optional live percentage target, with bounded grace and fallback."""
+        entity = ev.get("charge_limit_sensor")
+        if entity:
+            try:
+                target = self._input(entity, "soc", now)
+            except (ValueError, TypeError):
+                return float(ev["max_soc"]), "configured fallback"
+            source = "cached charge limit" if entity in self._input_health else "live charge limit"
+            return target, source
+        return float(ev["max_soc"]), "configured maximum"
+
     def add_listener(self, entity):
         self.listeners.append(entity)
 
@@ -184,9 +196,11 @@ class ForecastCoordinator:
             self.status,
             self.current_kw,
             tuple((p["time"], p["value"]) for p in self.forecast),
+            tuple((ev.get("target_soc"), ev.get("target_source"),
+                   ev.get("charge_power_kw"), ev.get("active_assumed")) for ev in self.ev_details),
         )
         previous = self._last_emitted
-        changed = previous is None or previous[0] != signature[0]
+        changed = previous is None or previous[0] != signature[0] or previous[3] != signature[3]
         if not changed:
             old_now, old_forecast = previous[1], previous[2]
             new_now, new_forecast = signature[1], signature[2]
@@ -230,6 +244,7 @@ class ForecastCoordinator:
                 )
             except ValueError:
                 pass
+        watched.update(ev["charge_limit_sensor"] for ev in self.evs if ev.get("charge_limit_sensor"))
         watched.update(ev["away_sensor"] for ev in self.evs if ev.get("away_sensor"))
         self._unsubs.append(async_track_state_change_event(
             self.hass, list(watched), self._source_changed
@@ -504,22 +519,23 @@ class ForecastCoordinator:
                     })
                     continue
                 low = float(ev["min_soc"])
-                high = float(ev["max_soc"])
+                high, target_source = self._charge_target(ev, now)
                 capacity = float(ev["capacity_kwh"])
                 remaining_kwh = max(0.0, (high - soc) / 100.0 * capacity)
                 ac_kwh = remaining_kwh / DEFAULT_EFFICIENCY
-                p_soc = soc_probability(soc, low, high, float(ev["probability_gamma"]))
+                p_soc = (soc_probability(soc, low, high, float(ev["probability_gamma"]))
+                         if high > low else float(soc < high))
                 active = ev["id"] == active_ev_id
                 away = self._input(ev["away_sensor"], "away", now) if ev.get("away_sensor") else None
                 identity = identification if active else "not charging"
                 candidate_info = []
                 if active:
-                    # Always honour a detected session, including surprise
-                    # charging near/above the configured normal maximum.
-                    # If the configured target is already passed, reserve
-                    # one hour provisionally until charger power stops.
+                    # An observed session follows measured EVSE power. Only an
+                    # unknown target needs a provisional hour after its fallback
+                    # maximum is reached; a valid live limit gives a known end.
                     power = measured_ev
-                    unknown_target = ac_kwh <= 0.01
+                    known_live_target = target_source in ("live charge limit", "cached charge limit")
+                    unknown_target = ac_kwh <= 0.01 and not known_live_target
                     duration_h = ac_kwh / power if not unknown_target else 1.0
                     sessions.append({
                         "start": now, "end": now + timedelta(hours=duration_h),
@@ -558,6 +574,11 @@ class ForecastCoordinator:
                     start_iso = candidate_info[0]["start"] if candidate_info else None
                 details.append({
                     "name": ev["name"], "soc": round(soc, 1),
+                    "target_soc": high, "target_source": target_source,
+                    "charge_limit_entity": ev.get("charge_limit_sensor"),
+                    "charge_power_kw": round(power, 3),
+                    "charge_power_source": "measured EVSE" if active else "configured assumption",
+                    "estimated_remaining_hours": round(duration_h, 3),
                     "charge_probability": round(probability, 4),
                     "energy_to_target_kwh": round(ac_kwh, 2),
                     "expected_energy_kwh": round(ac_kwh * probability, 2),
