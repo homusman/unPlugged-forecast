@@ -1,5 +1,7 @@
 """Forecast and diagnostic sensors."""
 from __future__ import annotations
+from datetime import datetime
+from .planning_entity import PlanningEntity
 
 from homeassistant.components.sensor import SensorEntity, SensorDeviceClass, SensorStateClass
 from .const import DOMAIN
@@ -16,6 +18,11 @@ async def async_setup_entry(hass, entry, async_add_entities):
         UnpluggedSensor(coordinator, "ev_load", "Live EV charging load"),
         UnpluggedSensor(coordinator, "status", "Forecast status"),
         UnpluggedSensor(coordinator, "daily_energy", "Daily baseline energy"),
+        *[ChargePlanSensor(coordinator, ev, key, label) for ev in coordinator.evs
+          for key, label in (("next_charge", "Next planned charge"),
+                             ("charge_energy", "Planned charge energy"),
+                             ("charge_status", "Charge plan status"),
+                             ("driving_energy", "Estimated daily driving energy"))],
     ])
 
 
@@ -92,3 +99,26 @@ class UnpluggedSensor(SensorEntity):
                 ) if c.current_kw is not None else {},
             }
         return None
+
+
+class ChargePlanSensor(PlanningEntity, SensorEntity):
+    def __init__(self, coordinator, ev, key, label):
+        super().__init__(coordinator, ev, key, label)
+        self.key = key
+        if key == "next_charge":
+            self._attr_device_class = SensorDeviceClass.TIMESTAMP
+        elif key in ("charge_energy", "driving_energy"):
+            self._attr_device_class = SensorDeviceClass.ENERGY
+            self._attr_native_unit_of_measurement = "kWh"
+
+    @property
+    def native_value(self):
+        if self.key == "next_charge":
+            value = self.plan.get("start")
+            return datetime.fromisoformat(value) if value and self.plan.get("status") in ("Scheduled", "Charging") else None
+        if self.key == "charge_energy":
+            return self.plan.get("energy_kwh", 0)
+        if self.key == "driving_energy":
+            return self.plan.get("daily_driving_kwh")
+        status = self.plan.get("status", "Off")
+        return "Window too short" if status == "Scheduled" and not self.plan.get("can_finish", True) else status

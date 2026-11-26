@@ -244,3 +244,65 @@ A valid live limit already reached means no further predicted charging energy, r
 EV diagnostics include `target_soc`, `target_source`, `charge_limit_entity`, `charge_power_kw`, `charge_power_source` and `estimated_remaining_hours`. The power input is the existing EV charging power entity; with multiple EVs it is still an aggregate measurement attributed using the existing session-identification logic.
 
 Leave the optional entity empty to retain configured-target behavior. Clearing it in Edit EV removes the mapping. Reinstall v0.2.12 and restart Core to roll back.
+
+## Persistent next-charge planning (v0.2.14)
+
+Planning is **off by default**. After updating and restarting Core, open the
+unPlugged Forecast device. Each configured EV now has:
+
+| Entity | Purpose |
+| --- | --- |
+| Charge schedule | Off / Auto / Tonight / Tomorrow night / In 2–7 nights / Skip |
+| Charging starts | Local start time; defaults to the EV's configured start hour |
+| Ready by | Local deadline; defaults to 07:00 |
+| Daily driving fallback | Default 8 kWh/day until enough SoC history exists |
+| Charge reminders | Opt-in Home Assistant persistent notifications |
+| Replan charge | Explicitly discard the retained intention and calculate a new one |
+| Next planned charge | Resolved timestamp, independent of the relative selector label |
+| Planned charge energy | Estimated AC energy needed at the future session |
+| Charge plan status | Scheduled, Charging, Completed, Missed, Incomplete, or Window too short |
+| Estimated daily driving energy | Learned estimate or configured fallback, with source metadata |
+
+Start by setting the window and fallback, then select **Auto** or a specific night.
+The selector records your last request; a relative label such as Tomorrow night
+is resolved to a concrete date once. Check **Next planned charge** for that retained
+date after midnight or a restart. Press Replan charge or choose a mode again to
+resolve a new date. Changing window times preserves the retained evening date.
+Off preserves the existing probabilistic forecasting. Skip omits future EV
+charging forecasts. Both still account for measured charging when it happens.
+
+Auto uses negative SoC changes from up to 14 days of history, excluding charging
+gains, to estimate daily battery consumption. It needs at least eight distinct
+readings spanning three days; otherwise it uses the fallback. This includes
+standby losses and may include SoC estimation noise; it is not a trip planner.
+It chooses a night before the configured minimum SoC reserve is expected to be
+used up. The selected date stays fixed; a near-term reserve risk can bring it
+forward. It does not keep postponing the date as forecasts change.
+
+A committed session has probability one and replaces that EV's probabilistic
+session forecast. Its energy includes expected consumption before the session,
+the current live charge target (or configured maximum), usable capacity and
+the existing 90% charging-efficiency assumption. Its planned power is the
+configured charging power, limited to the selected window. A shortfall is
+reported rather than implying that a full charge fits an insufficient window.
+Forecasts beyond the configured horizon only affect HAEO when they enter that
+horizon.
+
+Actual charging takes precedence: current SoC and measured EVSE power determine
+remaining energy and duration, and an unplanned session consumes the existing
+intention instead of adding a second future session. Auto chooses another night
+after a completed charge stops. Manual completed plans stay completed. Missed
+or incomplete windows stay visible until you press Replan charge or select
+another night. No unnoticed daily rescheduling occurs.
+
+Enable Charge reminders for one Home Assistant notification two hours before
+the scheduled start and another if the window is missed/incomplete. These are
+not phone push notifications. You can use the exposed sensors in your own
+mobile-notification automations. Notification deduplication and intentions
+survive restart; this small private storage is separate from Recorder.
+
+unPlugged forecasts and reminds only. It never sets Tesla charge limits,
+commands an EVSE, or guarantees that an unplugged or separately restricted
+vehicle will charge. You still need to plug in and allow charging. Turning
+planning off restores the previous probabilistic model. For rollback, reinstall
+v0.2.13 through HACS and restart Core.

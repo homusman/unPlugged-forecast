@@ -170,3 +170,69 @@ class HistoryRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.states.update({"sensor.ev": 2.95, "sensor.house": 3.95})
         await self.publish_charge()
         self.assertEqual(listener.async_write_ha_state.call_count, 2)
+
+
+    async def test_planned_session_replaces_probabilistic_forecasts_and_persists(self):
+        self.configure_charging_ev()
+        self.c.entry.entry_id = "test-entry"
+        self.c.planning["car"] = {"mode": "Tomorrow night"}
+        with patch.object(self.module, "candidate_weights", side_effect=AssertionError("probabilistic forecast used")), \
+             patch.object(self.module, "construct_forecast", wraps=self.module.construct_forecast) as build:
+            await self.publish_charge()
+        sessions = build.call_args.kwargs["sessions"]
+        self.assertEqual(len(sessions), 1)
+        plan = self.c.charge_plans["car"]
+        self.assertEqual(sessions[0]["start"].isoformat(), plan["start"])
+        self.assertEqual(sessions[0]["power"], 7)
+        self.assertEqual(self.c.ev_details[0]["charge_probability"], 1)
+        from unittest.mock import Mock
+        store = SimpleNamespace(async_load=AsyncMock(return_value=self.c.planning),
+                                async_save=AsyncMock(), async_delay_save=Mock())
+        with patch.object(self.module, "Store", return_value=store):
+            await self.c.async_load_plans()
+        self.assertEqual(self.c.planning["car"]["plan"]["start"], plan["start"])
+        await self.c.async_stop()
+        store.async_save.assert_awaited()
+
+    async def test_skip_does_not_hide_actual_unplanned_charging(self):
+        self.configure_charging_ev()
+        self.c.planning["car"] = {"mode": "Skip"}
+        await self.publish_charge()
+        self.assertEqual(self.c.ev_details[0]["expected_energy_kwh"], 0)
+        self.states.update({"sensor.ev": 3, "sensor.house": 4})
+        with patch.object(self.module, "construct_forecast", wraps=self.module.construct_forecast) as build:
+            await self.publish_charge(1)
+        self.assertEqual(len(build.call_args.kwargs["sessions"]), 1)
+        self.assertEqual(build.call_args.kwargs["sessions"][0]["power"], 3)
+
+    async def test_time_changes_keep_the_original_manual_evening_date(self):
+        self.configure_charging_ev()
+        self.c.planning["car"] = {"mode": "Tomorrow night"}
+        await self.publish_charge()
+        original = self.c.planning["car"]["plan"]["start"]
+        self.c.async_publish = AsyncMock()
+        await self.c.async_set_plan("car", "start_time", "19:00:00")
+        changed = self.c.planning["car"]["plan"]["start"]
+        self.assertEqual(self.module.dt_util.as_local(self.module.datetime.fromisoformat(original)).date(),
+                         self.module.dt_util.as_local(self.module.datetime.fromisoformat(changed)).date())
+        self.assertEqual(self.module.dt_util.as_local(self.module.datetime.fromisoformat(changed)).hour, 19)
+
+    async def test_reminders_are_opt_in_and_deduplicated(self):
+        from datetime import timedelta
+        self.configure_charging_ev()
+        self.c.entry.entry_id = "test-entry"
+        start = self.module.dt_util.as_local(self.now).replace(hour=18)
+        end = start + timedelta(hours=13)
+        self.c.planning["car"] = {"mode": "Tonight", "plan": {
+            "start": start.isoformat(), "ready_by": end.isoformat(), "status": "Scheduled"}}
+        ev = self.c.evs[0]
+        with patch.object(self.module.persistent_notification, "async_create") as notify:
+            self.c._update_charge_plan(ev, start - timedelta(hours=1), 50, 80, False, 0)
+            notify.assert_not_called()
+            self.c.planning["car"]["reminders"] = True
+            self.c._update_charge_plan(ev, start - timedelta(hours=1), 50, 80, False, 0)
+            self.c._update_charge_plan(ev, start - timedelta(minutes=30), 50, 80, False, 0)
+            self.assertEqual(notify.call_count, 1)
+            self.c._update_charge_plan(ev, end + timedelta(minutes=1), 50, 80, False, 0)
+            self.c._update_charge_plan(ev, end + timedelta(minutes=2), 50, 80, False, 0)
+            self.assertEqual(notify.call_count, 2)

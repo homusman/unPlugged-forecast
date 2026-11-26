@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 import logging
+import json
 import math
 
+from homeassistant.components import persistent_notification
+from homeassistant.helpers.storage import Store
 from homeassistant.components.recorder import get_instance
 from homeassistant.components.recorder.history import get_significant_states
 from homeassistant.components.recorder.statistics import statistics_during_period
@@ -15,7 +18,8 @@ from homeassistant.helpers.event import (
 )
 from homeassistant.util import dt as dt_util
 
-from .const import DEFAULT_EFFICIENCY, DEFAULT_INTERVAL
+from .const import DOMAIN, DEFAULT_EFFICIENCY, DEFAULT_INTERVAL
+from .planning import update_plan, window, MODES
 from .timeline import construct_forecast
 from .inertia import LoadInertia, correction_mode
 from .learning import (
@@ -118,6 +122,10 @@ class ForecastCoordinator:
         self._last_emitted = None
         self._inertia = LoadInertia()
         self.correction_diagnostics = {}
+        self.planning = {}
+        self.charge_plans = {}
+        self._plan_store = None
+        self._saved_plan_signature = "{}"
 
     @property
     def options(self):
@@ -183,6 +191,84 @@ class ForecastCoordinator:
             return target, source
         return float(ev["max_soc"]), "configured maximum"
 
+    async def async_load_plans(self):
+        """Load intentions independently of configuration reloads and Recorder."""
+        self._plan_store = Store(self.hass, 1, f"{DOMAIN}.charge_plans.{self.entry.entry_id}", private=True)
+        self.planning = await self._plan_store.async_load() or {}
+        self._saved_plan_signature = json.dumps(self.planning, sort_keys=True)
+
+    def _persist_plans(self):
+        signature = json.dumps(self.planning, sort_keys=True)
+        if self._plan_store is not None and signature != self._saved_plan_signature:
+            self._saved_plan_signature = signature
+            self._plan_store.async_delay_save(lambda: self.planning, 1)
+
+    async def async_set_plan(self, ev_id, key, value):
+        """Change a forecasting intention only; never command a vehicle."""
+        if ev_id not in {ev["id"] for ev in self.evs}:
+            raise ValueError("Unknown EV")
+        if key == "mode" and value not in MODES:
+            raise ValueError("Invalid planning mode")
+        if key not in ("mode", "start_time", "ready_time", "daily_kwh", "reminders", "replan"):
+            raise ValueError("Invalid planning setting")
+        if key in ("start_time", "ready_time"):
+            parsed = time.fromisoformat(value)
+            if parsed.tzinfo is not None:
+                raise ValueError("Charging times must be local wall times")
+            value = parsed.replace(microsecond=0).isoformat()
+        if key == "daily_kwh":
+            value = float(value)
+            if not math.isfinite(value) or not 0 <= value <= 100:
+                raise ValueError("Driving fallback must be between 0 and 100 kWh")
+        settings = self.planning.setdefault(ev_id, {})
+        if key != "replan":
+            settings[key] = value
+        if key in ("mode", "replan"):
+            settings.pop("plan", None)
+        elif key in ("start_time", "ready_time") and settings.get("plan"):
+            ev = next(ev for ev in self.evs if ev["id"] == ev_id)
+            original = dt_util.as_local(datetime.fromisoformat(settings["plan"]["start"]))
+            start, end = window(original.date(), settings, ev, original.tzinfo)
+            settings["plan"].update(start=start.isoformat(), ready_by=end.isoformat())
+        if (key == "reminders" and not value) or (key == "mode" and value in ("Off", "Skip")):
+            persistent_notification.async_dismiss(self.hass, f"{DOMAIN}_{self.entry.entry_id}_{ev_id}")
+        await self.async_publish()
+        if self._plan_store is not None:
+            await self._plan_store.async_save(self.planning)
+        self._persist_plans()
+
+    def _update_charge_plan(self, ev, now, soc, target, active, power):
+        settings = self.planning.setdefault(ev["id"], {})
+        rows = list(self._soc_history.get(ev["id"], [])) + list(self._live_soc.get(ev["id"], []))
+        rows = [(at, value) for at, value in rows if now - timedelta(days=14) <= at <= now]
+        if soc is not None and ev["soc_sensor"] not in self._input_health:
+            rows.append((now, soc))
+        previous = self.charge_plans.get(ev["id"], {})
+        plan = update_plan(settings, ev, now, soc, target, active, power, rows, dt_util.as_local)
+        if settings.get("reminders", False) and previous.get("start") and (
+            plan["status"] == "Completed" or previous["start"] != plan.get("start")
+        ):
+            persistent_notification.async_dismiss(self.hass, f"{DOMAIN}_{self.entry.entry_id}_{ev['id']}")
+        self.charge_plans[ev["id"]] = plan
+        record = settings.get("plan")
+        if settings.get("reminders", False) and record:
+            due = datetime.fromisoformat(record["start"]) - timedelta(hours=2)
+            status = plan["status"]
+            reminder = "due" if status == "Scheduled" and now >= due else status
+            if reminder in ("due", "Missed", "Incomplete") and record.get("notified") != reminder:
+                message = (f"Charge {ev['name']} for the planned session starting {dt_util.as_local(datetime.fromisoformat(record['start'])):%a %d %b %H:%M}. "
+                           f"Expected AC energy: {plan['energy_kwh']:.1f} kWh; target {target:g}%. "
+                           "This is a reminder; unPlugged does not control the charger.")
+                if not plan.get("can_finish", True):
+                    message += f" The window is too short by an estimated {plan['unserved_energy_kwh']:.1f} kWh."
+                if reminder != "due":
+                    message = f"{ev['name']} charging plan is {status.lower()}. Select a new night or press Replan charge. " + message
+                persistent_notification.async_create(self.hass, message, title="unPlugged charge plan",
+                                                     notification_id=f"{DOMAIN}_{self.entry.entry_id}_{ev['id']}")
+                record["notified"] = reminder
+        self._persist_plans()
+        return plan
+
     def add_listener(self, entity):
         self.listeners.append(entity)
 
@@ -199,8 +285,10 @@ class ForecastCoordinator:
             tuple((ev.get("target_soc"), ev.get("target_source"),
                    ev.get("charge_power_kw"), ev.get("active_assumed")) for ev in self.ev_details),
         )
+        signature += (json.dumps(self.charge_plans, sort_keys=True),)
         previous = self._last_emitted
-        changed = previous is None or previous[0] != signature[0] or previous[3] != signature[3]
+        changed = (previous is None or previous[0] != signature[0]
+                   or previous[3:] != signature[3:])
         if not changed:
             old_now, old_forecast = previous[1], previous[2]
             new_now, new_forecast = signature[1], signature[2]
@@ -267,6 +355,8 @@ class ForecastCoordinator:
             await self.async_publish()
 
     async def async_stop(self):
+        if self._plan_store is not None:
+            await self._plan_store.async_save(self.planning)
         for unsub in self._unsubs:
             unsub()
         self._unsubs.clear()
@@ -504,6 +594,7 @@ class ForecastCoordinator:
                     # independent household baseload forecast. Keep actual
                     # measured house and EV power for current-state reporting.
                     unavailable_evs.append(ev["name"])
+                    self._update_charge_plan(ev, now, None, float(ev["max_soc"]), False, 0)
                     details.append({
                         "name": ev["name"], "soc": None,
                         "charge_probability": 0.0,
@@ -529,6 +620,7 @@ class ForecastCoordinator:
                 away = self._input(ev["away_sensor"], "away", now) if ev.get("away_sensor") else None
                 identity = identification if active else "not charging"
                 candidate_info = []
+                plan = self._update_charge_plan(ev, now, soc, high, active, measured_ev)
                 if active:
                     # An observed session follows measured EVSE power. Only an
                     # unknown target needs a provisional hour after its fallback
@@ -545,6 +637,25 @@ class ForecastCoordinator:
                     start_iso = now.isoformat()
                     if unknown_target:
                         identity += "; target already reached, 1h provisional"
+                elif plan["mode"] != "Off":
+                    probability = 0.0
+                    power = float(ev["charge_power_kw"])
+                    duration_h = 0.0
+                    start_iso = plan["start"]
+                    if plan["status"] == "Scheduled":
+                        probability = 1.0
+                        ac_kwh = plan["energy_kwh"]
+                        start = max(now, datetime.fromisoformat(plan["start"]))
+                        deadline = datetime.fromisoformat(plan["ready_by"])
+                        duration_h = ac_kwh / power
+                        end = min(deadline, start + timedelta(hours=duration_h))
+                        if end > start:
+                            sessions.append({"start": start, "end": end, "power": power, "ev_id": ev["id"]})
+                        start_iso = start.isoformat()
+                        identity = "committed charge plan"
+                    else:
+                        ac_kwh = 0.0
+                        identity = plan["status"]
                 else:
                     # A car known to be away may return needing a charge.
                     # This only increases the likelihood, not the predicted

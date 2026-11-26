@@ -7,12 +7,13 @@ from homeassistant.const import Platform
 
 from .coordinator import ForecastCoordinator
 
-PLATFORMS = [Platform.SENSOR]
+PLATFORMS = [Platform.SENSOR, Platform.SELECT, Platform.TIME, Platform.NUMBER, Platform.SWITCH, Platform.BUTTON]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = ForecastCoordinator(hass, entry)
     entry.runtime_data = coordinator
+    await coordinator.async_load_plans()
     await coordinator.async_start()
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
